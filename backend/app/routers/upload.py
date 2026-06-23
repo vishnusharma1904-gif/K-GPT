@@ -42,7 +42,9 @@ async def upload(
     if project_id and not db.get_project(project_id, claims["user_id"]):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Project not found.")
 
+    import traceback
     stored = 0
+    last_err = None
     for c in chunks:
         try:
             db.insert_memory_scoped(
@@ -50,8 +52,20 @@ async def upload(
                 kind="document", source=file.filename, project_id=project_id,
             )
             stored += 1
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            last_err = str(e)
             continue
+            
+    if stored == 0 and chunks:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Memory insertion failed: {last_err or 'Unknown error'}")
+
+    # Auto-routing mapping based on extension
+    ext = ("." + (file.filename or "").rsplit(".", 1)[-1].lower()) if "." in (file.filename or "") else ""
+    suggested = "long_context"  # default for docs
+    if ext in {".py", ".js", ".ts", ".html", ".css", ".java", ".c", ".cpp", ".sql"}:
+        suggested = "coding"
+    elif ext in {".csv", ".xlsx", ".xls"}:
+        suggested = "reasoning"
 
     return {
         "ok": True,
@@ -59,4 +73,5 @@ async def upload(
         "chunks_stored": stored,
         "project_id": project_id,
         "truncated": len(chunks) >= MAX_CHUNKS,
+        "suggested_category": suggested,
     }

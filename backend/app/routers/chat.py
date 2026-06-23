@@ -182,6 +182,7 @@ async def _build_messages(user: dict, req: ChatReq) -> tuple[list[dict], list[di
 
     name = (user.get("full_name") or "").split(" ")[0] or None
     profile = auto_memory.profile_block(user["id"]) if user.get("memory_enabled", True) else None
+    is_admin = user.get("role") == "admin"
     sys = prompting.build_system_prompt(
         persona=req.persona,
         student_name=name,
@@ -191,6 +192,7 @@ async def _build_messages(user: dict, req: ChatReq) -> tuple[list[dict], list[di
         memory_context=combined_ctx,
         has_untrusted_docs=bool(req.web_search or memory_ctx),
         user_profile=profile,
+        is_admin=is_admin,
     )
     if project and project.get("instructions"):
         sys += f"\n\nProject context — {project['name']}:\n{project['instructions']}"
@@ -425,21 +427,27 @@ async def chat_stream(req: ChatReq, request: Request, claims: dict = Depends(cur
         full = ""        # everything received from the model so far
         emitted = 0      # chars already streamed to the client
         leaked = False
-        with fairuse.concurrency(user["id"], is_admin):
-            async for chunk in smart_router.stream(msgs, category=category, allow_premium=allow_premium, model=chosen):
-                if "delta" in chunk:
-                    full += chunk["delta"]
-                    if prompt_guard.output_leaked(full)[0]:
-                        leaked = True
-                        break
-                    safe = len(full) - guard_tail
-                    if safe > emitted:
-                        yield _sse({"event": "delta", "text": full[emitted:safe]})
-                        emitted = safe
-                elif "reasoning" in chunk:
-                    yield _sse({"event": "reasoning", "text": chunk["reasoning"]})
-                elif "done" in chunk:
-                    final = chunk["done"]
+        try:
+            with fairuse.concurrency(user["id"], is_admin):
+                async for chunk in smart_router.stream(msgs, category=category, allow_premium=allow_premium, model=chosen):
+                    if "delta" in chunk:
+                        full += chunk["delta"]
+                        if prompt_guard.output_leaked(full)[0]:
+                            leaked = True
+                            break
+                        safe = len(full) - guard_tail
+                        if safe > emitted:
+                            yield _sse({"event": "delta", "text": full[emitted:safe]})
+                            emitted = safe
+                    elif "reasoning" in chunk:
+                        yield _sse({"event": "reasoning", "text": chunk["reasoning"]})
+                    elif "done" in chunk:
+                        final = chunk["done"]
+        except Exception as e:
+            err_text = f"\n\n⚠️ Error: {str(e)}"
+            yield _sse({"event": "delta", "text": err_text})
+            final = {"model": "error", "completion_tokens": 0, "prompt_tokens": 0, "cost_usd": 0.0}
+            full += err_text  # store the error in db so it doesn't fail empty constraint
 
         # Flush the held-back tail, or redact if the reply leaked.
         if leaked or prompt_guard.output_leaked(full)[0]:
@@ -452,6 +460,10 @@ async def chat_stream(req: ChatReq, request: Request, claims: dict = Depends(cur
         else:
             if len(full) > emitted:
                 yield _sse({"event": "delta", "text": full[emitted:]})
+            elif not full:
+                msg = "\n\n*(The model returned an empty response. If you attached a document, the provider's safety filters may have blocked it.)*"
+                yield _sse({"event": "delta", "text": msg})
+                full += msg
             text_to_store = full
 
         if final or full:
@@ -468,7 +480,12 @@ async def chat_stream(req: ChatReq, request: Request, claims: dict = Depends(cur
             usage = entitlements.usage_view(db.get_user(user["id"]))
             yield _sse({"event": "done", "model": (final or {}).get("model", "guard"), "usage": usage})
 
-    return StreamingResponse(gen(), media_type="text/event-stream")
+    headers = {
+        "Cache-Control": "no-cache, no-transform",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no"
+    }
+    return StreamingResponse(gen(), media_type="text/event-stream", headers=headers)
 
 
 def _sse(obj: dict) -> str:

@@ -235,6 +235,8 @@ export async function streamChat(
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      "Accept": "text/event-stream",
+      "ngrok-skip-browser-warning": "69420",
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
     body: JSON.stringify(body),
@@ -262,7 +264,9 @@ export async function streamChat(
         const evt = JSON.parse(line);
         if (evt.event === "delta") onDelta(evt.text);
         else onMeta(evt);
-      } catch {}
+      } catch (err: any) {
+        onDelta(`\n\n[Parse Error: ${err.message}] `);
+      }
     }
   }
 }

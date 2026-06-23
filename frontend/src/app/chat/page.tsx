@@ -218,6 +218,10 @@ export default function ChatPage() {
     try {
       const r = await uploadFile(f);
       setNotice(`Added "${f.name}" to memory (${r.chunks_stored} chunks). Ask me about it!`);
+      if (r.suggested_category) {
+        setCategory(r.suggested_category);
+        setModel(""); // Clear any specifically chosen model to allow auto-routing
+      }
     } catch (err: any) { setNotice(`⚠️ ${err.message}`); }
     finally { if (fileRef.current) fileRef.current.value = ""; setTimeout(() => setNotice(""), 5000); }
   }
