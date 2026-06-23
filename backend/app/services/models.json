@@ -1,0 +1,286 @@
+{
+  "_comment": "K-GPT model registry \u2014 cheap-first MoE/light routing. Costs USD per 1M tokens (in/out). Exotic models route via OpenRouter (one key) so the chain stays resilient; SmartRouter circuit-breaks any decommissioned/unavailable id and fails over automatically.",
+  "categories": {
+    "instant": {
+      "_desc": "Ultra-cheap, sub-second chat \u2014 short/simple turns, near-cap downshift.",
+      "primary": "groq/llama-3.1-8b-instant",
+      "fallbacks": [
+        "groq/gemma2-9b-it",
+        "gemini/gemini-1.5-flash-8b",
+        "openai/gpt-4o-mini"
+      ]
+    },
+    "fast_chat": {
+      "_desc": "Default everyday chat \u2014 cheap 1x models first; 70B only as last resort.",
+      "primary": "gemini/gemini-2.0-flash",
+      "fallbacks": [
+        "deepseek/deepseek-chat",
+        "groq/llama-3.1-8b-instant",
+        "groq/gemma2-9b-it",
+        "groq/llama-3.3-70b-versatile"
+      ]
+    },
+    "reasoning": {
+      "_desc": "Deep STEM/logic \u2014 DeepSeek primary, strong cheap fallbacks.",
+      "primary": "deepseek/deepseek-chat",
+      "fallbacks": [
+        "groq/llama-3.3-70b-versatile",
+        "gemini/gemini-2.0-flash",
+        "openrouter/qwen/qwen-2.5-72b-instruct",
+        "fireworks_ai/accounts/fireworks/models/mixtral-8x22b-instruct"
+      ]
+    },
+    "coding": {
+      "_desc": "Code gen/debug \u2014 DeepSeek Coder + Qwen Coder + Codestral.",
+      "primary": "deepseek/deepseek-coder",
+      "fallbacks": [
+        "openrouter/qwen/qwen-2.5-coder-32b-instruct",
+        "mistral/codestral-latest",
+        "groq/llama-3.3-70b-versatile"
+      ]
+    },
+    "multilingual": {
+      "_desc": "Telugu / Tenglish / mixed \u2014 Qwen excels; Gemini multimodal backstop.",
+      "primary": "openrouter/qwen/qwen-2.5-72b-instruct",
+      "fallbacks": [
+        "gemini/gemini-2.0-flash",
+        "groq/llama-3.3-70b-versatile"
+      ]
+    },
+    "vision": {
+      "_desc": "Image/diagram understanding.",
+      "primary": "gemini/gemini-2.0-flash",
+      "fallbacks": [
+        "openai/gpt-4o-mini",
+        "gemini/gemini-1.5-flash-8b"
+      ]
+    },
+    "long_context": {
+      "_desc": "Big PDFs/codebases \u2014 128k\u20131M context.",
+      "primary": "gemini/gemini-2.0-flash",
+      "fallbacks": [
+        "openrouter/ai21/jamba-1-5-mini",
+        "mistral/open-mistral-nemo",
+        "openrouter/moonshotai/kimi-k2"
+      ]
+    },
+    "tool_use": {
+      "_desc": "Function calling / routing (Phase 37).",
+      "primary": "groq/llama3-groq-8b-8192-tool-use-preview",
+      "fallbacks": [
+        "openai/gpt-4o-mini",
+        "groq/llama-3.3-70b-versatile"
+      ]
+    },
+    "rag": {
+      "_desc": "Cited answers over memory/docs \u2014 Command R cites natively.",
+      "primary": "cohere/command-r",
+      "fallbacks": [
+        "gemini/gemini-2.0-flash",
+        "groq/llama-3.3-70b-versatile"
+      ]
+    },
+    "background": {
+      "_desc": "Internal jobs \u2014 chat titles, intent, summaries. Tiniest/cheapest.",
+      "primary": "nvidia_nim/nvidia/nemotron-mini-4b-instruct",
+      "fallbacks": [
+        "groq/llama-3.1-8b-instant",
+        "groq/gemma2-9b-it"
+      ]
+    },
+    "premium": {
+      "_desc": "Opt-in best \u2014 still cost-controlled (gpt-4o-mini lead).",
+      "primary": "openai/gpt-4o-mini",
+      "fallbacks": [
+        "gemini/gemini-2.5-flash",
+        "anthropic/claude-3-5-sonnet-20241022"
+      ]
+    }
+  },
+  "pricing_per_1m": {
+    "groq/llama-3.1-8b-instant": {
+      "in": 0.05,
+      "out": 0.08
+    },
+    "groq/llama-3.3-70b-versatile": {
+      "in": 0.59,
+      "out": 0.79
+    },
+    "groq/gemma2-9b-it": {
+      "in": 0.06,
+      "out": 0.06
+    },
+    "groq/llama3-groq-8b-8192-tool-use-preview": {
+      "in": 0.05,
+      "out": 0.08
+    },
+    "gemini/gemini-1.5-flash-8b": {
+      "in": 0.075,
+      "out": 0.3
+    },
+    "gemini/gemini-2.0-flash": {
+      "in": 0.1,
+      "out": 0.4
+    },
+    "gemini/gemini-2.5-flash": {
+      "in": 0.5,
+      "out": 1.5
+    },
+    "openai/gpt-4o-mini": {
+      "in": 0.15,
+      "out": 0.6
+    },
+    "anthropic/claude-3-5-sonnet-20241022": {
+      "in": 3.0,
+      "out": 15.0
+    },
+    "deepseek/deepseek-chat": {
+      "in": 0.3,
+      "out": 0.5
+    },
+    "deepseek/deepseek-coder": {
+      "in": 0.14,
+      "out": 0.28
+    },
+    "mistral/codestral-latest": {
+      "in": 0.3,
+      "out": 0.9
+    },
+    "mistral/open-mixtral-8x7b": {
+      "in": 0.2,
+      "out": 0.2
+    },
+    "mistral/open-mixtral-8x22b": {
+      "in": 0.5,
+      "out": 0.5
+    },
+    "mistral/open-mistral-nemo": {
+      "in": 0.15,
+      "out": 0.15
+    },
+    "mistral/ministral-8b-latest": {
+      "in": 0.1,
+      "out": 0.1
+    },
+    "cohere/command-r": {
+      "in": 0.5,
+      "out": 1.5
+    },
+    "nvidia_nim/nvidia/nemotron-mini-4b-instruct": {
+      "in": 0.03,
+      "out": 0.03
+    },
+    "nvidia_nim/nvidia/llama-3.1-nemotron-70b-instruct": {
+      "in": 0.59,
+      "out": 0.79
+    },
+    "fireworks_ai/accounts/fireworks/models/llama-v3p3-70b-instruct": {
+      "in": 0.9,
+      "out": 0.9
+    },
+    "fireworks_ai/accounts/fireworks/models/mixtral-8x22b-instruct": {
+      "in": 0.5,
+      "out": 0.5
+    },
+    "openrouter/qwen/qwen-2.5-72b-instruct": {
+      "in": 0.29,
+      "out": 0.59
+    },
+    "openrouter/qwen/qwen-2.5-coder-32b-instruct": {
+      "in": 0.29,
+      "out": 0.59
+    },
+    "openrouter/deepseek/deepseek-chat": {
+      "in": 0.3,
+      "out": 0.5
+    },
+    "openrouter/01-ai/yi-lightning": {
+      "in": 0.14,
+      "out": 0.28
+    },
+    "openrouter/thudm/glm-4-flash": {
+      "in": 0.1,
+      "out": 0.3
+    },
+    "openrouter/moonshotai/kimi-k2": {
+      "in": 0.4,
+      "out": 1.2
+    },
+    "openrouter/ai21/jamba-1-5-mini": {
+      "in": 0.2,
+      "out": 0.4
+    },
+    "openrouter/databricks/dbrx-instruct": {
+      "in": 0.6,
+      "out": 0.6
+    },
+    "openrouter/microsoft/wizardlm-2-8x22b": {
+      "in": 0.5,
+      "out": 0.5
+    },
+    "openrouter/minimax/minimax-m1": {
+      "in": 0.3,
+      "out": 1.2
+    },
+    "fireworks_ai/accounts/fireworks/models/kimi-k2p7-code": {
+      "in": 0.95,
+      "out": 4.0
+    },
+    "fireworks_ai/accounts/fireworks/models/minimax-m3": {
+      "in": 0.3,
+      "out": 1.2
+    },
+    "fireworks_ai/accounts/fireworks/models/qwen3p7-plus": {
+      "in": 0.4,
+      "out": 1.6
+    },
+    "fireworks_ai/accounts/fireworks/models/deepseek-v4-pro": {
+      "in": 1.74,
+      "out": 3.48
+    },
+    "fireworks_ai/accounts/fireworks/models/kimi-k2p6": {
+      "in": 0.95,
+      "out": 4.0
+    },
+    "fireworks_ai/accounts/fireworks/models/minimax-m2p7": {
+      "in": 0.3,
+      "out": 1.2
+    },
+    "fireworks_ai/accounts/fireworks/models/qwen3p6-plus": {
+      "in": 0.5,
+      "out": 3.0
+    },
+    "fireworks_ai/accounts/fireworks/models/glm-5p1": {
+      "in": 1.4,
+      "out": 4.4
+    },
+    "fireworks_ai/accounts/fireworks/models/gpt-oss-120b": {
+      "in": 0.15,
+      "out": 0.6
+    },
+    "fireworks_ai/accounts/fireworks/models/gpt-oss-20b": {
+      "in": 0.07,
+      "out": 0.3
+    },
+    "fireworks_ai/accounts/fireworks/models/nemotron-3-ultra-nvfp4": {
+      "in": 0.6,
+      "out": 2.4
+    },
+    "fireworks_ai/accounts/fireworks/models/deepseek-v4-flash": {
+      "in": 0.14,
+      "out": 0.28
+    }
+  },
+  "provider_env": {
+    "groq": "GROQ_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "mistral": "MISTRAL_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "cohere": "COHERE_API_KEY",
+    "fireworks_ai": "FIREWORKS_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+    "nvidia_nim": "NVIDIA_NIM_API_KEY"
+  }
+}

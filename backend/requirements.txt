@@ -1,0 +1,23 @@
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+pydantic==2.10.3
+pydantic-settings==2.6.1
+python-dotenv==1.0.1
+python-multipart==0.0.20
+email-validator==2.2.0
+PyJWT==2.10.1
+passlib==1.7.4
+httpx>=0.27.0
+litellm>=1.63.2
+supabase==2.10.0
+sentence-transformers==3.3.1
+razorpay==1.4.2
+tiktoken==0.8.0
+apscheduler==3.10.4
+# --- Migration 003 features ---
+PyMuPDF==1.24.13          # PDF text extraction (P29)
+python-docx==1.1.2        # DOCX extraction (P29)
+python-pptx==1.0.2        # PPTX extraction (P29)
+openpyxl==3.1.5           # XLSX extraction (P29)
+sentry-sdk==2.19.2        # observability (P5, optional)
+pytest==8.3.4             # tests (P6)

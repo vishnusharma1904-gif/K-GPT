@@ -1,0 +1,467 @@
+"""Admin console API (owner-only) — students, entitlements, tiering, audit.
+
+Every mutating action is recorded in `entitlement_log`. Token integers are
+visible to the admin here (analytics), never to students.
+"""
+from __future__ import annotations
+
+from pydantic import BaseModel, Field
+
+from fastapi import APIRouter, Depends, HTTPException, status
+
+from app.core.security import require_admin
+from app.db import supabase_client as db
+from app.services import entitlements, safety
+from app.services import quota_policy as qp
+
+router = APIRouter(prefix="/api/admin", tags=["admin"])
+
+
+# --- request bodies ---------------------------------------------------------
+class Targets(BaseModel):
+    user_ids: list[str] = Field(min_length=1)
+
+
+class GrantBody(Targets):
+    tokens: int = Field(gt=0, le=10_000_000)
+
+
+class TierBody(Targets):
+    tier: str  # 'normal' | 'heavy'
+
+
+class SuspendBody(Targets):
+    suspended: bool
+
+
+def _admin_view(u: dict) -> dict:
+    """Admin sees real numbers + the student's %; never exposed to students."""
+    cap = qp.effective_cap(u.get("daily_cap") or 0,
+                           u.get("weekly_bonus_claimed_today") or 0,
+                           u.get("bonus_balance") or 0)
+    return {
+        "id": u["id"], "full_name": u.get("full_name"), "email": u.get("email"),
+        "roll_no": u.get("roll_no"), "role": u.get("role"),
+        "sub_status": u.get("sub_status"), "suspended": u.get("suspended"),
+        "tier": u.get("tier"), "tier_override": u.get("tier_override"),
+        "weekly_bonus_available": u.get("weekly_bonus_available"),
+        "daily_used": u.get("daily_used"), "daily_cap": u.get("daily_cap"),
+        "bonus_balance": u.get("bonus_balance"),
+        "plan": u.get("plan"), "monitored": safety.is_monitored(u),
+        "percent_used": qp.percent_used(u.get("daily_used") or 0, cap),
+    }
+
+
+# --- overview ---------------------------------------------------------------
+@router.get("/stats")
+async def stats(_: dict = Depends(require_admin)):
+    users = db.list_users(limit=5000)
+    active = [u for u in users if u.get("sub_status") == "active"]
+    return {
+        "total_users": len(users),
+        "active_subs": len(active),
+        "students": len([u for u in users if u.get("role") == "student"]),
+        "heavy_tier": len([u for u in users if u.get("tier") == "heavy"]),
+        "suspended": len([u for u in users if u.get("suspended")]),
+        "total_tokens_used": sum((u.get("used_tokens") or 0) for u in users),
+    }
+
+
+@router.get("/users")
+async def users(_: dict = Depends(require_admin)):
+    return [_admin_view(u) for u in db.list_users(limit=5000)]
+
+
+@router.get("/users/{user_id}/log")
+async def entitlement_log(user_id: str, _: dict = Depends(require_admin)):
+    return db.get_entitlement_log(user_id)
+
+
+# --- subscription (kept from M1) -------------------------------------------
+@router.post("/users/{user_id}/grant-access")
+async def grant_access(user_id: str, months: int = 6, admin: dict = Depends(require_admin)):
+    from datetime import datetime, timedelta, timezone
+    expires = (datetime.now(timezone.utc) + timedelta(days=30 * months)).isoformat()
+    db.update_user(user_id, {"sub_status": "active", "sub_expires_at": expires})
+    db.insert_entitlement_log(admin["user_id"], user_id, "grant_access", 0, f"{months} months")
+    return {"ok": True, "expires_at": expires}
+
+
+# --- entitlement actions (single or bulk) ----------------------------------
+@router.post("/entitlements/reset-daily")
+async def reset_daily(body: Targets, admin: dict = Depends(require_admin)):
+    for uid in body.user_ids:
+        entitlements.admin_reset_daily(admin["user_id"], uid)
+    return {"ok": True, "count": len(body.user_ids)}
+
+
+@router.post("/entitlements/grant-tokens")
+async def grant_tokens(body: GrantBody, admin: dict = Depends(require_admin)):
+    for uid in body.user_ids:
+        entitlements.admin_grant_tokens(admin["user_id"], uid, body.tokens)
+    return {"ok": True, "count": len(body.user_ids), "tokens": body.tokens}
+
+
+@router.post("/entitlements/set-tier")
+async def set_tier(body: TierBody, admin: dict = Depends(require_admin)):
+    for uid in body.user_ids:
+        entitlements.admin_set_tier(admin["user_id"], uid, body.tier)
+    return {"ok": True, "count": len(body.user_ids), "tier": body.tier}
+
+
+@router.post("/entitlements/clear-override")
+async def clear_override(body: Targets, admin: dict = Depends(require_admin)):
+    for uid in body.user_ids:
+        entitlements.admin_clear_override(admin["user_id"], uid)
+    return {"ok": True, "count": len(body.user_ids)}
+
+
+@router.post("/entitlements/refresh-bonus")
+async def refresh_bonus(body: Targets, admin: dict = Depends(require_admin)):
+    for uid in body.user_ids:
+        entitlements.admin_refresh_bonus(admin["user_id"], uid)
+    return {"ok": True, "count": len(body.user_ids)}
+
+
+@router.post("/entitlements/suspend")
+async def suspend(body: SuspendBody, admin: dict = Depends(require_admin)):
+    for uid in body.user_ids:
+        entitlements.admin_set_suspended(admin["user_id"], uid, body.suspended)
+    return {"ok": True, "count": len(body.user_ids), "suspended": body.suspended}
+
+
+# --- maintenance ------------------------------------------------------------
+@router.post("/entitlements/run-nightly")
+async def run_nightly(_: dict = Depends(require_admin)):
+    """Manually trigger the daily reset + auto-tiering sweep."""
+    return entitlements.run_nightly()
+
+
+# ============================================================================
+# Admin v2 — search/filter, analytics, coupons, bulk activation (P44/P45/P18)
+# ============================================================================
+from datetime import datetime, timedelta, timezone  # noqa: E402
+from collections import Counter  # noqa: E402
+
+from pydantic import BaseModel as _BM  # noqa: E402
+
+
+class CouponBody(_BM):
+    code: str
+    percent_off: int = Field(ge=1, le=100)
+    max_redemptions: int | None = None
+    expires_at: str | None = None
+
+
+class BulkActivateBody(_BM):
+    roll_nos: list[str] = Field(min_length=1)
+    months: int = 6
+
+
+@router.get("/users/search")
+async def users_search(q: str | None = None, tier: str | None = None,
+                       sub_status: str | None = None, _: dict = Depends(require_admin)):
+    """Cohort/section filtering + free-text search over name/email/roll (P44)."""
+    rows = db.list_users(limit=5000)
+    ql = (q or "").lower().strip()
+    out = []
+    for u in rows:
+        if ql and ql not in (
+            f"{u.get('full_name','')} {u.get('email','')} {u.get('roll_no','')}".lower()):
+            continue
+        if tier and u.get("tier") != tier:
+            continue
+        if sub_status and u.get("sub_status") != sub_status:
+            continue
+        out.append(_admin_view(u))
+    return {"count": len(out), "users": out}
+
+
+@router.get("/analytics")
+async def analytics(days: int = 14, _: dict = Depends(require_admin)):
+    """Adoption + cost trends. Raw tokens are admin-only here (never to students)."""
+    since = (datetime.now(timezone.utc) - timedelta(days=days))
+    users = db.list_users(limit=5000)
+
+    # tier + subscription distribution
+    tier_dist = Counter(u.get("tier", "normal") for u in users if u.get("role") == "student")
+    sub_dist = Counter(u.get("sub_status", "inactive") for u in users if u.get("role") == "student")
+
+    # daily activity + cost from the metering tables
+    try:
+        daily = db.usage_daily_all(since.date().isoformat())
+    except Exception:
+        daily = []
+    try:
+        log = db.usage_log_recent(since.isoformat())
+    except Exception:
+        log = []
+
+    by_day: dict[str, dict] = {}
+    for r in daily:
+        d = str(r["day"])
+        slot = by_day.setdefault(d, {"day": d, "active_users": set(), "tokens": 0})
+        slot["active_users"].add(r["user_id"])
+        slot["tokens"] += int(r["tokens"])
+    series = [{"day": d, "active_users": len(v["active_users"]), "tokens": v["tokens"]}
+              for d, v in sorted(by_day.items())]
+
+    model_mix = Counter()
+    total_cost = 0.0
+    wau = set()
+    for r in log:
+        model_mix[r["model"]] += 1
+        total_cost += float(r.get("cost_usd") or 0)
+        wau.add(r["user_id"])
+
+    return {
+        "window_days": days,
+        "totals": {
+            "students": sum(1 for u in users if u.get("role") == "student"),
+            "active_subs": sub_dist.get("active", 0),
+            "wau": len(wau),
+            "cost_usd": round(total_cost, 4),
+        },
+        "tier_distribution": dict(tier_dist),
+        "sub_distribution": dict(sub_dist),
+        "model_mix": model_mix.most_common(12),
+        "daily": series,
+    }
+
+
+@router.post("/coupons")
+async def create_coupon(body: CouponBody, admin: dict = Depends(require_admin)):
+    db.sb().table("coupons").upsert({
+        "code": body.code.upper(), "percent_off": body.percent_off,
+        "max_redemptions": body.max_redemptions, "expires_at": body.expires_at,
+        "active": True,
+    }).execute()
+    db.insert_entitlement_log(admin["user_id"], admin["user_id"], "create_coupon",
+                              body.percent_off, body.code.upper())
+    return {"ok": True, "code": body.code.upper()}
+
+
+@router.get("/coupons")
+async def list_coupons(_: dict = Depends(require_admin)):
+    return db.sb().table("coupons").select("*").order("created_at", desc=True).execute().data
+
+
+@router.post("/bulk-activate")
+async def bulk_activate(body: BulkActivateBody, admin: dict = Depends(require_admin)):
+    """Activate a whole class/section by roll-number list (P18)."""
+    expires = (datetime.now(timezone.utc) + timedelta(days=30 * body.months)).isoformat()
+    rolls = {r.strip().upper() for r in body.roll_nos if r.strip()}
+    users = db.list_users(limit=5000)
+    activated = 0
+    for u in users:
+        if (u.get("roll_no") or "").upper() in rolls:
+            db.update_user(u["id"], {"sub_status": "active", "sub_expires_at": expires})
+            db.insert_entitlement_log(admin["user_id"], u["id"], "bulk_activate",
+                                      0, f"{body.months} months")
+            activated += 1
+    return {"ok": True, "activated": activated, "requested": len(rolls)}
+
+
+# ============================================================================
+# Feature flags (P4) + cost governance (P46) — admin-only
+# ============================================================================
+from app.services import cost_governance, flags  # noqa: E402
+
+
+class FlagBody(_BM):
+    enabled: bool
+
+
+class BudgetBody(_BM):
+    cohort: str
+    monthly_usd: float = Field(ge=0)
+    alert_pct: int = Field(default=80, ge=1, le=100)
+
+
+@router.get("/flags")
+async def get_flags(_: dict = Depends(require_admin)):
+    return db.list_feature_flags()
+
+
+@router.patch("/flags/{key}")
+async def set_flag(key: str, body: FlagBody, admin: dict = Depends(require_admin)):
+    updated = db.set_feature_flag(key, {"enabled": body.enabled})
+    flags.invalidate()
+    db.insert_entitlement_log(admin["user_id"], admin["user_id"], "set_flag",
+                              int(body.enabled), key)
+    return updated or {"ok": True}
+
+
+@router.get("/budgets")
+async def get_budgets(_: dict = Depends(require_admin)):
+    """Cohort budgets + month-to-date spend evaluation (P46)."""
+    return cost_governance.evaluate_all()
+
+
+@router.put("/budgets")
+async def put_budget(body: BudgetBody, admin: dict = Depends(require_admin)):
+    db.upsert_cohort_budget(body.cohort, body.monthly_usd, body.alert_pct)
+    db.insert_entitlement_log(admin["user_id"], admin["user_id"], "set_budget",
+                              int(body.monthly_usd), body.cohort)
+    return {"ok": True, "cohort": body.cohort}
+
+
+@router.post("/budgets/enforce")
+async def enforce_budgets(_: dict = Depends(require_admin)):
+    """Manually run the throttle sweep (also runs nightly)."""
+    return cost_governance.enforce()
+
+
+@router.get("/usage-log")
+async def usage_log(limit: int = 100, _: dict = Depends(require_admin)):
+    """Recent per-request logs: who used which model and how many tokens (P7/P45).
+    Admin-only — raw token integers are allowed here, never to students."""
+    limit = max(1, min(limit, 500))
+    try:
+        rows = db.usage_log_latest(limit)
+    except Exception:
+        rows = []
+    users = {u["id"]: u for u in db.list_users(limit=5000)}
+    feed = []
+    by_model: dict[str, dict] = {}
+    total_tokens = total_cost = 0
+    for r in rows:
+        u = users.get(r["user_id"], {})
+        p_tok = int(r.get("prompt_tokens") or 0)
+        c_tok = int(r.get("completion_tokens") or 0)
+        tot = p_tok + c_tok
+        cost = float(r.get("cost_usd") or 0)
+        total_tokens += tot
+        total_cost += cost
+        m = r.get("model") or "—"
+        agg = by_model.setdefault(m, {"model": m, "requests": 0, "tokens": 0, "cost_usd": 0.0})
+        agg["requests"] += 1
+        agg["tokens"] += tot
+        agg["cost_usd"] = round(agg["cost_usd"] + cost, 6)
+        feed.append({
+            "created_at": r.get("created_at"),
+            "user": u.get("full_name") or u.get("email") or r["user_id"][:8],
+            "email": u.get("email"),
+            "model": m,
+            "prompt_tokens": p_tok,
+            "completion_tokens": c_tok,
+            "total_tokens": tot,
+            "cost_usd": round(cost, 6),
+        })
+    by_model_list = sorted(by_model.values(), key=lambda x: x["tokens"], reverse=True)
+    return {
+        "count": len(feed),
+        "total_tokens": total_tokens,
+        "total_cost_usd": round(total_cost, 4),
+        "by_model": by_model_list,
+        "rows": feed,
+    }
+
+
+# --- Grant a specific plan to selected users (admin) -----------------------
+class GrantPlanBody(_BM):
+    user_ids: list[str] = Field(min_length=1)
+    plan: str
+
+
+@router.post("/grant-plan")
+async def grant_plan(body: GrantPlanBody, admin: dict = Depends(require_admin)):
+    """Activate selected users on a named plan (monthly/semester/annual …),
+    setting expiry from the plan's duration and the plan's tier/cap."""
+    plan = db.get_plan(body.plan)
+    if not plan:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Unknown plan: {body.plan}")
+    expires = (datetime.now(timezone.utc)
+               + timedelta(days=int(plan["duration_days"]))).isoformat()
+    tier = plan.get("tier") or "normal"
+    for uid in body.user_ids:
+        patch = {"sub_status": "active", "sub_expires_at": expires, "plan": plan["code"]}
+        if tier != "normal":   # pin non-default tiers (monthly/heavy) + their cap
+            patch.update({"tier": tier, "tier_override": True,
+                          "daily_cap": qp.cap_for_tier(tier)})
+        db.update_user(uid, patch)
+        db.insert_entitlement_log(admin["user_id"], uid, "grant_plan",
+                                  int(plan["duration_days"]), plan["code"])
+    return {"ok": True, "count": len(body.user_ids), "plan": plan["code"],
+            "tier": tier, "expires_at": expires}
+
+
+# ============================================================================
+# Safety monitoring / safeguarding (admin oversight)
+# Scope: campus plans only (semester / monthly). Annual "public" users are NOT
+# viewable here and are not logged. Every chat view is recorded for audit.
+# ============================================================================
+class ReviewBody(_BM):
+    notes: str | None = None
+
+
+def _ensure_monitored(user_id: str) -> dict:
+    u = db.get_user(user_id)
+    if not u:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    if not safety.is_monitored(u):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "This user is on the public (annual) plan and is not covered by "
+            "campus monitoring.")
+    return u
+
+
+@router.get("/monitor/summary")
+async def monitor_summary(_: dict = Depends(require_admin)):
+    """Severity tallies for the monitoring dashboard header."""
+    return db.safety_event_counts()
+
+
+@router.get("/monitor/events")
+async def monitor_events(severity: str | None = None, reviewed: str | None = None,
+                         user_id: str | None = None, limit: int = 200,
+                         _: dict = Depends(require_admin)):
+    """Flagged jailbreak / safety events, newest first, enriched with the
+    student's name + email for triage."""
+    rev = True if reviewed in ("true", "1") else False if reviewed in ("false", "0") else None
+    rows = db.list_safety_events(severity=severity or None, reviewed=rev,
+                                 user_id=user_id or None, limit=limit)
+    users = {u["id"]: u for u in db.list_users(limit=5000)}
+    out = []
+    for r in rows:
+        u = users.get(r["user_id"], {})
+        out.append({**r,
+                    "user_name": u.get("full_name") or u.get("email") or r["user_id"][:8],
+                    "user_email": u.get("email"),
+                    "user_plan": u.get("plan")})
+    return {"count": len(out), "events": out}
+
+
+@router.post("/monitor/events/{event_id}/review")
+async def monitor_review(event_id: str, body: ReviewBody,
+                         admin: dict = Depends(require_admin)):
+    updated = db.review_safety_event(event_id, admin["user_id"], body.notes)
+    if not updated:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")
+    return updated
+
+
+@router.get("/monitor/users/{user_id}/sessions")
+async def monitor_user_sessions(user_id: str, _: dict = Depends(require_admin)):
+    """List a monitored student's chat sessions (oversight)."""
+    u = _ensure_monitored(user_id)
+    return {
+        "user": {"id": u["id"], "full_name": u.get("full_name"),
+                 "email": u.get("email"), "plan": u.get("plan"),
+                 "roll_no": u.get("roll_no")},
+        "sessions": db.admin_list_sessions(user_id),
+    }
+
+
+@router.get("/monitor/users/{user_id}/sessions/{session_id}")
+async def monitor_user_messages(user_id: str, session_id: str,
+                                admin: dict = Depends(require_admin)):
+    """Full transcript of a monitored student's session. The view itself is
+    recorded in the entitlement log for accountability."""
+    _ensure_monitored(user_id)
+    sess = db.get_session(session_id, user_id)
+    if not sess:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
+    db.insert_entitlement_log(admin["user_id"], user_id, "view_chat", 0, session_id)
+    return {"session": sess, "messages": db.admin_get_messages(session_id, user_id)}

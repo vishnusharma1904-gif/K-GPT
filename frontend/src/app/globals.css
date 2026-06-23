@@ -1,0 +1,328 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400;14..32,500;14..32,600;14..32,700;14..32,800;14..32,900&family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&display=swap');
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================================================
+   K-GPT — "4D / 8K" Ultra-Clear Design System
+   Deep-space aurora glass · layered depth · crisp rendering
+   ============================================================ */
+
+:root {
+  --font-sans: 'Inter';
+  --font-mono: 'JetBrains Mono';
+  --radius: 14px;
+  color-scheme: light;
+
+  /* Light theme — serene nature: misty dawn, forest, teal water, warm sun */
+  --bg: 170 30% 97%;
+  --bg-2: 192 34% 93%;
+  --surface: 160 30% 99%;
+  --surface-2: 168 26% 95%;
+  --border: 166 18% 87%;
+  --fg: 196 34% 12%;
+  --muted: 192 12% 38%;
+  --brand: 162 52% 40%;
+  --brand-2: 188 66% 42%;
+  --brand-fg: 0 0% 100%;
+  --accent: 38 92% 52%;
+  --accent-2: 150 54% 44%;
+  --danger: 6 72% 52%;
+  --success: 150 58% 38%;
+  --warning: 36 92% 48%;
+
+  --glow: 175 60% 45%;
+  --halo: 168 60% 40%;
+  --shadow-color: 195 40% 18%;
+  --glass-tint: 165 40% 99%;
+  --glass-opacity: 0.62;
+  --grain-opacity: 0.02;
+}
+
+.dark {
+  color-scheme: dark;
+  /* Serene nature dusk — deep teal-forest, emerald glass, warm sun accents */
+  --bg: 196 34% 6%;
+  --bg-2: 188 38% 8%;
+  --surface: 196 26% 9%;
+  --surface-2: 194 22% 13%;
+  --border: 190 18% 19%;
+  --fg: 168 28% 96%;
+  --muted: 185 14% 66%;
+  --brand: 160 62% 52%;
+  --brand-2: 186 72% 52%;
+  --brand-fg: 192 60% 7%;
+  --accent: 40 92% 62%;
+  --accent-2: 150 58% 52%;
+  --danger: 4 78% 64%;
+  --success: 150 60% 50%;
+  --warning: 38 92% 60%;
+
+  --glow: 172 70% 50%;
+  --halo: 168 70% 48%;
+  --shadow-color: 196 60% 2%;
+  --glass-tint: 194 34% 13%;
+  --glass-opacity: 0.5;
+  --grain-opacity: 0.035;
+}
+
+* { border-color: hsl(var(--border)); }
+
+html { scroll-behavior: smooth; }
+
+body {
+  position: relative;
+  background:
+    radial-gradient(1400px 760px at 14% -12%, hsl(var(--brand) / 0.18), transparent 56%),
+    radial-gradient(1200px 620px at 100% -6%, hsl(var(--accent) / 0.16), transparent 52%),
+    radial-gradient(1100px 820px at 50% 122%, hsl(var(--accent-2) / 0.16), transparent 62%),
+    linear-gradient(180deg, hsl(var(--bg)), hsl(var(--bg-2)));
+  background-attachment: fixed;
+  color: hsl(var(--fg));
+  font-family: var(--font-sans), system-ui, sans-serif;
+  font-feature-settings: "cv11", "ss01", "liga" 1, "calt" 1;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  letter-spacing: -0.011em;
+}
+
+/* Fine film-grain overlay → kills banding on big gradients (the "8K" crispness) */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  pointer-events: none;
+  opacity: var(--grain-opacity);
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  mix-blend-mode: overlay;
+}
+
+/* ============================================================
+   Typography — ultra-crisp, optical sizing
+   ============================================================ */
+h1, h2, h3, h4 { letter-spacing: -0.025em; line-height: 1.08; font-weight: 800; }
+h1 { font-optical-sizing: auto; }
+.tabular { font-variant-numeric: tabular-nums; }
+
+/* ============================================================
+   Glass system — real depth, crisp edges, inner light
+   ============================================================ */
+.glass {
+  background:
+    linear-gradient(180deg, hsl(var(--glass-tint) / calc(var(--glass-opacity) + 0.06)),
+                            hsl(var(--glass-tint) / var(--glass-opacity)));
+  backdrop-filter: blur(20px) saturate(165%);
+  -webkit-backdrop-filter: blur(20px) saturate(165%);
+  border: 1px solid hsl(var(--border) / 0.9);
+  box-shadow:
+    0 1px 0 hsl(0 0% 100% / 0.06) inset,
+    0 0 0 1px hsl(0 0% 100% / 0.02) inset,
+    0 10px 34px -18px hsl(var(--shadow-color) / 0.7);
+}
+
+.glass-strong {
+  background:
+    linear-gradient(180deg, hsl(var(--glass-tint) / 0.85), hsl(var(--glass-tint) / 0.6));
+  backdrop-filter: blur(28px) saturate(180%);
+  -webkit-backdrop-filter: blur(28px) saturate(180%);
+  border: 1px solid hsl(var(--border) / 0.95);
+  box-shadow:
+    0 1px 0 hsl(0 0% 100% / 0.08) inset,
+    0 30px 90px -34px hsl(var(--shadow-color) / 0.85),
+    0 0 60px -24px hsl(var(--halo) / 0.35);
+}
+
+/* Holographic gradient hairline border (wraps any element) */
+.holo {
+  position: relative;
+  border-radius: var(--radius);
+}
+.holo::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(135deg,
+    hsl(var(--brand) / 0.9), hsl(var(--accent) / 0.7) 40%,
+    transparent 60%, hsl(var(--brand-2) / 0.8));
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+          mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+          mask-composite: exclude;
+  pointer-events: none;
+}
+
+/* ============================================================
+   3D tilt / parallax — the "4D" feel
+   ============================================================ */
+.scene { perspective: 1400px; }
+.tilt {
+  transform-style: preserve-3d;
+  transition: transform .4s cubic-bezier(0.22, 1, 0.36, 1), box-shadow .4s ease;
+  will-change: transform;
+}
+.lift { transition: transform .2s cubic-bezier(0.22,1,0.36,1), box-shadow .2s ease; }
+.lift:hover { transform: translateY(-3px); box-shadow: 0 18px 50px -22px hsl(var(--shadow-color) / 0.8); }
+
+/* ============================================================
+   Gradient + glow text
+   ============================================================ */
+.text-gradient {
+  background: linear-gradient(135deg, hsl(var(--brand)), hsl(var(--accent)) 55%, hsl(var(--brand-2)));
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.aurora-text {
+  background: linear-gradient(110deg,
+    hsl(var(--brand)), hsl(var(--accent)), hsl(var(--brand-2)), hsl(var(--brand)));
+  background-size: 250% auto;
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+  animation: aurora-pan 6s linear infinite;
+}
+.text-glow { text-shadow: 0 0 24px hsl(var(--halo) / 0.55); }
+
+/* ============================================================
+   Scrollbars — slim, quiet, premium
+   ============================================================ */
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--border)); border-radius: 99px;
+  border: 2px solid transparent; background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background: hsl(var(--muted) / 0.7); background-clip: padding-box; }
+* { scrollbar-width: thin; scrollbar-color: hsl(var(--border)) transparent; }
+
+/* ============================================================
+   Chat markdown bubbles
+   ============================================================ */
+.prose-chat { line-height: 1.68; font-size: 0.95rem; }
+.prose-chat p { margin: 0.55rem 0; }
+.prose-chat > :first-child { margin-top: 0; }
+.prose-chat > :last-child { margin-bottom: 0; }
+.prose-chat pre {
+  background: hsl(240 24% 6%);
+  border: 1px solid hsl(var(--border) / 0.8);
+  border-radius: 12px; padding: 14px; overflow-x: auto; margin: 0.7rem 0;
+  font-family: var(--font-mono); font-size: 0.84rem;
+  box-shadow: 0 8px 24px -16px hsl(var(--shadow-color) / 0.7);
+}
+.prose-chat code { font-family: var(--font-mono); font-size: 0.85em; }
+.prose-chat :not(pre) > code {
+  background: hsl(var(--surface-2)); padding: 1.5px 6px; border-radius: 6px;
+  border: 1px solid hsl(var(--border) / 0.7);
+}
+.prose-chat ul, .prose-chat ol { margin: 0.45rem 0 0.45rem 1.25rem; }
+.prose-chat ul { list-style: disc; } .prose-chat ol { list-style: decimal; }
+.prose-chat li { margin: 0.2rem 0; }
+.prose-chat h1,.prose-chat h2,.prose-chat h3 { font-weight: 700; margin: 0.9rem 0 0.35rem; line-height: 1.25; }
+.prose-chat h1 { font-size: 1.3em; } .prose-chat h2 { font-size: 1.15em; } .prose-chat h3 { font-size: 1.05em; }
+.prose-chat a { color: hsl(var(--accent)); text-decoration: underline; text-underline-offset: 2px; }
+.prose-chat a:hover { color: hsl(var(--brand)); }
+.prose-chat blockquote {
+  border-left: 3px solid hsl(var(--brand) / 0.6);
+  padding-left: 0.9rem; margin: 0.6rem 0; color: hsl(var(--muted));
+  background: hsl(var(--brand) / 0.05); border-radius: 0 8px 8px 0;
+}
+.prose-chat table { width: 100%; border-collapse: collapse; margin: 0.7rem 0; font-size: 0.85em; }
+.prose-chat th, .prose-chat td { border: 1px solid hsl(var(--border)); padding: 6px 10px; text-align: left; }
+.prose-chat th { background: hsl(var(--surface-2)); font-weight: 600; }
+.prose-chat hr { border: none; border-top: 1px solid hsl(var(--border)); margin: 1rem 0; }
+
+/* ============================================================
+   Form controls
+   ============================================================ */
+select { color: hsl(var(--fg)); }
+select, select option, select optgroup {
+  background-color: hsl(var(--surface)); color: hsl(var(--fg));
+}
+select option:checked { background-color: hsl(var(--brand) / 0.25); }
+::selection { background: hsl(var(--brand) / 0.32); color: hsl(var(--fg)); }
+
+input, textarea, select {
+  transition: border-color .15s ease, box-shadow .15s ease, background-color .15s ease;
+}
+input:focus, textarea:focus, select:focus {
+  outline: none;
+  border-color: hsl(var(--brand) / 0.85);
+  box-shadow: 0 0 0 3px hsl(var(--brand) / 0.20), 0 0 28px -10px hsl(var(--halo) / 0.5);
+}
+
+/* Pill / chip helper */
+.chip {
+  display: inline-flex; align-items: center; gap: 0.375rem;
+  border-radius: 9999px; padding: 0.18rem 0.65rem; font-size: 11px;
+  border: 1px solid hsl(var(--border)); background: hsl(var(--surface-2) / 0.6);
+}
+
+/* Shine sweep on primary buttons */
+.btn-shine { position: relative; overflow: hidden; }
+.btn-shine::after {
+  content: ""; position: absolute; inset: 0;
+  background: linear-gradient(110deg, transparent 30%, hsl(0 0% 100% / 0.25) 50%, transparent 70%);
+  transform: translateX(-120%);
+  transition: transform .7s ease;
+}
+.btn-shine:hover::after { transform: translateX(120%); }
+
+/* ============================================================
+   Keyframes
+   ============================================================ */
+@keyframes grid-pan { from { background-position: 0 0, 0 0; } to { background-position: 48px 48px, 48px 48px; } }
+@keyframes spin-slow { to { transform: rotate(360deg); } }
+@keyframes float-y { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-16px); } }
+@keyframes pulse-soft { 0%,100% { opacity: 0.5; } 50% { opacity: 0.95; } }
+@keyframes text-shimmer { to { background-position: -200% 0; } }
+@keyframes aurora-pan { to { background-position: 250% center; } }
+@keyframes glow-pulse {
+  0%,100% { box-shadow: 0 0 0 0 hsl(var(--halo) / 0.0); }
+  50% { box-shadow: 0 0 36px -6px hsl(var(--halo) / 0.55); }
+}
+@keyframes rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes scale-in { from { opacity: 0; transform: scale(0.96); } to { opacity: 1; transform: scale(1); } }
+@keyframes caret-blink { 0%,100% { opacity: 1; } 50% { opacity: 0; } }
+@keyframes sheen-x { to { background-position: 200% 0; } }
+/* Divine experience — watermark + caption fades */
+@keyframes kgptFade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes kgptRise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+
+/* faint animated grid that drifts diagonally, masked to fade at edges */
+.hero-grid {
+  background-image:
+    linear-gradient(hsl(var(--border) / 0.55) 1px, transparent 1px),
+    linear-gradient(90deg, hsl(var(--border) / 0.55) 1px, transparent 1px);
+  background-size: 48px 48px;
+  -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 35%, #000 30%, transparent 80%);
+          mask-image: radial-gradient(ellipse 80% 60% at 50% 35%, #000 30%, transparent 80%);
+  animation: grid-pan 14s linear infinite;
+}
+.animate-spin-slow   { animation: spin-slow 30s linear infinite; }
+.animate-float-y     { animation: float-y 7s ease-in-out infinite; }
+.animate-pulse-soft  { animation: pulse-soft 5s ease-in-out infinite; }
+.animate-text-shimmer{ animation: text-shimmer 2s linear infinite; }
+.animate-glow-pulse  { animation: glow-pulse 3.5s ease-in-out infinite; }
+.animate-rise        { animation: rise .5s cubic-bezier(0.22,1,0.36,1) both; }
+.animate-scale-in    { animation: scale-in .25s cubic-bezier(0.22,1,0.36,1) both; }
+
+/* Streaming caret for live assistant text */
+.stream-caret::after {
+  content: "▍"; margin-left: 1px; color: hsl(var(--brand));
+  animation: caret-blink 1s step-end infinite;
+}
+
+/* Skeleton shimmer for loading rows */
+.skeleton {
+  background: linear-gradient(90deg, hsl(var(--surface-2)) 25%, hsl(var(--border) / 0.6) 37%, hsl(var(--surface-2)) 63%);
+  background-size: 200% 100%;
+  animation: sheen-x 1.4s ease-in-out infinite;
+  border-radius: 8px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; scroll-behavior: auto !important; }
+  .hero-grid { animation: none !important; }
+}

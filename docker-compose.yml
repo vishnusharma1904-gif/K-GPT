@@ -1,0 +1,15 @@
+# K-GPT — local/VPS deployment. DB is Supabase (managed), so only app services here.
+services:
+  backend:
+    build: ./backend
+    env_file: ./backend/.env
+    ports: ["8400:8400"]
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    environment:
+      - NEXT_PUBLIC_API_URL=http://backend:8400
+    ports: ["3000:3000"]
+    depends_on: [backend]
+    restart: unless-stopped
