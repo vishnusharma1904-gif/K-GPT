@@ -107,6 +107,8 @@ def check_access(user: dict) -> None:
     if user.get("sub_status") != "active":
         raise HTTPException(status.HTTP_402_PAYMENT_REQUIRED,
                             "No active subscription. Pay the semester fee to use K-GPT.")
+
+    # Daily cap (persistent DB counter).
     eff = _effective_cap(user)
     if p.is_over_cap(user.get("daily_used") or 0, eff):
         secs = p.resets_in_seconds(_now(), _dt(user.get("daily_reset_at")))
@@ -116,6 +118,15 @@ def check_access(user: dict) -> None:
         raise HTTPException(
             status.HTTP_429_TOO_MANY_REQUESTS,
             f"You've reached today's limit. It resets in {hrs}h {mins}m.{bonus}",
+        )
+
+    # Weekly hard cap (shared across replicas via Redis; no-op if Redis is off).
+    from app.db import redis_client
+    weekly_used = redis_client.rate_current(user["id"], "tokens_weekly")
+    if weekly_used >= p.WEEKLY_CAP:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            f"You have reached the hard weekly limit of {p.WEEKLY_CAP:,} tokens. Please wait for the weekly reset.",
         )
 
 
@@ -133,8 +144,18 @@ def record_usage(user_id: str, model: str, p_tok: int, c_tok: int, cost: float) 
     # Frontier models drain the daily cap faster (e.g. 3.5x) regardless of the raw
     # token count. usage_log keeps the real tokens; the daily bucket is weighted.
     from app.services import smart_router
+    from app.db import redis_client
+
     billed = int(round((p_tok + c_tok) * smart_router.cost_multiplier(model)))
+
+    # 1. Persistent DB counter — the source of truth for daily tracking + tiering.
     db.rpc_increment_daily_usage(user_id, billed)
+
+    # 2. Fast Redis buckets — shared across replicas for the daily/weekly hard
+    #    caps. Both add `billed` (not 1) and refresh their TTL. No-op without Redis.
+    _DAY, _WEEK = 86_400, 604_800
+    redis_client.incr_by(user_id, "tokens_daily", billed, _DAY)
+    redis_client.incr_by(user_id, "tokens_weekly", billed, _WEEK)
 
 
 # --- Weekly bonus claim -----------------------------------------------------

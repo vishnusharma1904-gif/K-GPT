@@ -40,9 +40,20 @@ class Settings(BaseSettings):
     # --- Observability (P5) -------------------------------------------------
     sentry_dsn: str = ""
 
-    # --- Supabase / Postgres ------------------------------------------------
+    # --- Supabase (kept for backward compatibility during migration) --------
     supabase_url: str = ""
     supabase_service_key: str = ""
+
+    # --- Prompt Pulse Phase 1: Self-Hosted Infrastructure -------------------
+    database_url: str = ""                      # PostgreSQL (asyncpg)
+    redis_url: str = ""                         # Redis connection string
+    qdrant_host: str = ""                       # Qdrant vector DB host
+    qdrant_port: int = 6333                     # Qdrant port
+    qdrant_api_key: str = ""                    # Qdrant API key
+    rabbitmq_url: str = ""                      # RabbitMQ connection string
+    neo4j_uri: str = ""                         # Neo4j bolt URI
+    neo4j_user: str = "neo4j"                   # Neo4j username
+    neo4j_password: str = ""                    # Neo4j password
 
     # --- LLM providers (LiteLLM reads these from env automatically) ---------
     groq_api_key: str = ""
@@ -58,7 +69,9 @@ class Settings(BaseSettings):
     tavily_api_key: str = ""        # optional web-search (P33)
 
     # --- Quota defaults -----------------------------------------------------
-    default_quota_tokens: int = 1_500_000
+    default_quota_tokens: int = 1_500_000       # Legacy, replaced by daily/weekly
+    default_daily_tokens: int = 350_000         # Per user daily cap
+    default_weekly_tokens: int = 1_750_000      # Per user weekly cap
     default_daily_msgs: int = 200
     premium_models_for_students: bool = False
 
@@ -66,8 +79,9 @@ class Settings(BaseSettings):
     razorpay_key_id: str = ""
     razorpay_key_secret: str = ""
     razorpay_webhook_secret: str = ""
-    semester_fee_inr: int = 500
-    gst_percent: int = 18
+    semester_fee_inr: int = 500                 # default semester price (₹) when no plan row exists
+    gst_percent: int = 18                       # GST rate used to split GST-inclusive totals
+    gst_included: bool = True                   # Base prices already include GST
     current_semester: str = "2026-ODD"
 
     # --- CORS ---------------------------------------------------------------

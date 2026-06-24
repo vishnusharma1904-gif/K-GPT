@@ -13,6 +13,8 @@ from app.core.observability import (RequestContextMiddleware, init_sentry,
 from app.routers import (account, admin, auth, billing, chat, feedback, health,
                          memory, oauth, projects, prompts, share, status, study,
                          tools, upload, voice)
+from app.db import postgres_client, qdrant_client, queue_client
+from prometheus_fastapi_instrumentator import Instrumentator
 
 settings = get_settings()
 setup_logging(settings.debug)
@@ -45,15 +47,31 @@ async def lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001
         print(f"[warn] embedding warmup skipped: {e}")
 
+    # Initialize Prompt Pulse Phase 1 infrastructure. Each store is optional and
+    # may be configured-but-unreachable (e.g. running the API without the full
+    # Docker stack), so a failure here must NEVER crash startup — log and move on.
+    try:
+        await postgres_client.init_pool()
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] postgres init skipped: {e}")
+    try:
+        qdrant_client.ensure_collections()
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] qdrant init skipped: {e}")
+    try:
+        queue_client.ensure_queues()
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] rabbitmq init skipped: {e}")
+
     # Nightly quota reset + auto-tiering + subscription expiry (Epic B/C).
     scheduler = None
     if settings.supabase_url and settings.supabase_service_key:
         try:
             from apscheduler.schedulers.asyncio import AsyncIOScheduler
             from apscheduler.triggers.cron import CronTrigger
-            from app.services import entitlements
+            from app.services import entitlements, memory_compressor
 
-            def _nightly():
+            async def _nightly():
                 try:
                     entitlements.run_nightly()
                 except Exception as e:  # noqa: BLE001
@@ -63,6 +81,10 @@ async def lifespan(app: FastAPI):
                     cost_governance.enforce()   # P46 budget throttle sweep
                 except Exception as e:  # noqa: BLE001
                     print(f"[warn] cost-governance sweep failed: {e}")
+                try:
+                    await memory_compressor.run_nightly_compression()
+                except Exception as e:  # noqa: BLE001
+                    print(f"[warn] memory compression failed: {e}")
 
             scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
             scheduler.add_job(_nightly, CronTrigger(hour=0, minute=5))  # 00:05 IST
@@ -73,11 +95,17 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    # Shutdown Prompt Pulse infrastructure
+    await postgres_client.close_pool()
+
     if scheduler:
         scheduler.shutdown(wait=False)
 
 
 app = FastAPI(title="K-GPT API", version="1.2.0", lifespan=lifespan)
+
+# Setup Prometheus metrics
+Instrumentator().instrument(app).expose(app)
 
 app.add_middleware(RequestContextMiddleware)
 app.add_middleware(

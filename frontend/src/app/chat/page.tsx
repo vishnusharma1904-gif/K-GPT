@@ -19,7 +19,7 @@ import {
   Plus, Send, Trash2, LogOut, User, Sparkles, Menu, X, BookOpen, Code, GraduationCap,
   Search, Square, RefreshCw, Paperclip, Globe, Settings, Share2, ThumbsUp, ThumbsDown,
   Image as ImageIcon, Wand2, PanelRight, Shield, Brain, Copy, Check, ArrowDown,
-  Mic, Volume2, VolumeX, Pin, Download, Printer, Keyboard, Star,
+  Mic, Volume2, VolumeX, Pin, Download, Printer, Keyboard, Star, Loader2, FileText,
 } from "lucide-react";
 
 type Msg = { id?: string; role: "user" | "assistant"; content: string; model?: string; citations?: any[]; feedback?: number; reasoning?: string; ts?: number };
@@ -70,6 +70,8 @@ export default function ChatPage() {
   const [copiedI, setCopiedI] = useState<number | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [images, setImages] = useState<string[]>([]);
+  const [attachment, setAttachment] = useState<{ name: string; status: "uploading" | "ready" | "error"; chunks?: number; msg?: string; shared?: boolean } | null>(null);
+  const [shareUpload, setShareUpload] = useState(false);
   const [artifact, setArtifact] = useState<Artifact | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -214,16 +216,20 @@ export default function ChatPage() {
   async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0];
     if (!f) return;
-    setNotice(`Uploading ${f.name}…`);
+    const asShared = shareUpload && me?.role === "admin";
+    setAttachment({ name: f.name, status: "uploading", shared: asShared });
     try {
-      const r = await uploadFile(f);
-      setNotice(`Added "${f.name}" to memory (${r.chunks_stored} chunks). Ask me about it!`);
+      const r = await uploadFile(f, undefined, asShared);
+      setAttachment({ name: f.name, status: "ready", chunks: r.chunks_stored, shared: asShared });
       if (r.suggested_category) {
         setCategory(r.suggested_category);
         setModel(""); // Clear any specifically chosen model to allow auto-routing
       }
-    } catch (err: any) { setNotice(`⚠️ ${err.message}`); }
-    finally { if (fileRef.current) fileRef.current.value = ""; setTimeout(() => setNotice(""), 5000); }
+    } catch (err: any) {
+      setAttachment({ name: f.name, status: "error", msg: err.message, shared: asShared });
+    } finally {
+      if (fileRef.current) fileRef.current.value = "";
+    }
   }
 
   async function share() {
@@ -539,6 +545,13 @@ export default function ChatPage() {
               <button onClick={() => fileRef.current?.click()} className="flex items-center gap-1 rounded-lg px-2 py-1 text-muted hover:bg-surface-2">
                 <Paperclip size={13} /> Attach
               </button>
+              {me?.role === "admin" && (
+                <button onClick={() => setShareUpload((v) => !v)}
+                  title="When on, the next file you attach is stored in the shared knowledge base — every user's questions will be answered from it."
+                  className={`flex items-center gap-1 rounded-lg px-2 py-1 transition-colors ${shareUpload ? "bg-brand/15 text-brand" : "text-muted hover:bg-surface-2"}`}>
+                  <Shield size={13} /> {shareUpload ? "Shared KB: ON" : "Shared KB"}
+                </button>
+              )}
               <input ref={fileRef} type="file" className="hidden" onChange={onFile}
                 accept=".pdf,.docx,.pptx,.xlsx,.csv,.txt,.md" />
               <button onClick={() => imageRef.current?.click()} title="Attach image (vision)" className="flex items-center gap-1 rounded-lg px-2 py-1 text-muted hover:bg-surface-2">
@@ -577,6 +590,37 @@ export default function ChatPage() {
                       className="absolute -right-1.5 -top-1.5 rounded-full bg-surface-2 p-0.5 text-muted hover:text-danger"><X size={12} /></button>
                   </div>
                 ))}
+              </div>
+            )}
+            {attachment && (
+              <div className="mb-2 flex flex-wrap gap-2">
+                <div className={`group flex items-center gap-2 rounded-xl border px-3 py-2 text-xs shadow-sm ${
+                  attachment.status === "error"
+                    ? "border-danger/40 bg-danger/10 text-danger"
+                    : "border-border bg-surface-2 text-fg"}`}>
+                  <span className={`flex h-7 w-7 items-center justify-center rounded-lg ${
+                    attachment.status === "error" ? "bg-danger/15 text-danger" : "bg-brand/15 text-brand"}`}>
+                    {attachment.status === "uploading"
+                      ? <Loader2 size={14} className="animate-spin" />
+                      : <FileText size={14} />}
+                  </span>
+                  <div className="flex flex-col leading-tight">
+                    <span className="max-w-[220px] truncate font-medium">{attachment.name}</span>
+                    <span className="text-[11px] text-muted">
+                      {attachment.status === "uploading"
+                        ? (attachment.shared ? "Uploading to shared knowledge base…" : "Uploading & indexing…")
+                        : attachment.status === "ready"
+                        ? (attachment.shared
+                            ? `Saved to shared KB · ${attachment.chunks} chunks · all users can ask`
+                            : `Ready · ${attachment.chunks} chunks · ask about it`)
+                        : (attachment.msg || "Upload failed")}
+                    </span>
+                  </div>
+                  <button onClick={() => setAttachment(null)} title="Remove"
+                    className="ml-1 rounded-full p-1 text-muted hover:bg-surface hover:text-danger">
+                    <X size={13} />
+                  </button>
+                </div>
               </div>
             )}
             <div className="relative flex items-end gap-2">

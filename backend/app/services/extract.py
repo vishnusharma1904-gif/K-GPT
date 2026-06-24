@@ -13,7 +13,8 @@ import csv
 import io
 
 SUPPORTED = {".pdf", ".docx", ".pptx", ".xlsx", ".xls", ".csv", ".txt", ".md"}
-MAX_BYTES = 15 * 1024 * 1024  # 15 MB guard
+MAX_MB = 50
+MAX_BYTES = MAX_MB * 1024 * 1024  # upload size guard
 
 
 class ExtractError(Exception):
@@ -27,7 +28,7 @@ def _ext(filename: str) -> str:
 def extract_text(filename: str, data: bytes) -> str:
     """Return the plain text of an uploaded file. Raises ExtractError on failure."""
     if len(data) > MAX_BYTES:
-        raise ExtractError("File is too large (max 15 MB).")
+        raise ExtractError(f"File is too large (max {MAX_MB} MB).")
     ext = _ext(filename)
     if ext not in SUPPORTED:
         raise ExtractError(

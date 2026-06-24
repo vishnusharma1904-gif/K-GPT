@@ -110,6 +110,50 @@ def match_memory(user_id: str, query_embedding: list[float],
     return r.data or []
 
 
+# --- Shared institutional knowledge base (admin-uploaded, all users) --------
+def insert_shared_memory(content: str, embedding: list[float],
+                         source: str | None, uploaded_by: str) -> None:
+    """Store a chunk in the institution-wide knowledge base. Visible to every
+    user during retrieval (not scoped to one account)."""
+    sb().table("memory_chunks").insert({
+        "user_id": uploaded_by, "content": content, "embedding": embedding,
+        "kind": "institution", "source": source,
+        "shared": True, "verified": True,
+    }).execute()
+
+
+def match_shared_memory(query_embedding: list[float],
+                        limit: int = 6, min_sim: float = 0.40) -> list[dict[str, Any]]:
+    """Semantic search across the shared knowledge base (no user filter)."""
+    r = sb().rpc("match_shared_memory", {
+        "p_query": query_embedding, "p_limit": limit, "p_min_sim": min_sim,
+    }).execute()
+    return r.data or []
+
+
+def list_shared_documents() -> list[dict[str, Any]]:
+    """List shared-KB documents grouped by source filename, with chunk counts."""
+    rows = (sb().table("memory_chunks").select("source,created_at")
+            .eq("shared", True).execute().data) or []
+    grouped: dict[str, dict] = {}
+    for r in rows:
+        src = r.get("source") or "(untitled)"
+        g = grouped.setdefault(src, {"source": src, "chunks": 0, "created_at": r.get("created_at")})
+        g["chunks"] += 1
+        if r.get("created_at") and r["created_at"] < g["created_at"]:
+            g["created_at"] = r["created_at"]
+    return sorted(grouped.values(), key=lambda x: x["created_at"] or "", reverse=True)
+
+
+def delete_shared_document(source: str) -> int:
+    """Delete every shared chunk belonging to a source filename. Returns count."""
+    existing = (sb().table("memory_chunks").select("id")
+                .eq("shared", True).eq("source", source).execute().data) or []
+    if existing:
+        sb().table("memory_chunks").delete().eq("shared", True).eq("source", source).execute()
+    return len(existing)
+
+
 # --- Usage / metering -------------------------------------------------------
 def log_usage(user_id: str, model: str, p_tokens: int, c_tokens: int, cost: float) -> None:
     sb().table("usage_log").insert({

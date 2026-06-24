@@ -33,10 +33,12 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 # --- Constants ---------------------------------------------------------------
-NORMAL_DAILY_CAP = 500_000
-HEAVY_DAILY_CAP = 1_000_000
+NORMAL_DAILY_CAP = 350_000
+HEAVY_DAILY_CAP = 700_000     # Adjusted proportionately
+MONTHLY_DAILY_CAP = 150_000   # ₹100 monthly plan tier (still honoured for legacy subs)
 WEEKLY_BONUS = 100_000
-MONTHLY_DAILY_CAP = 150_000   # ₹100 monthly plan tier
+WEEKLY_CAP = 1_750_000        # New hard weekly limit
+
 
 # Auto-tiering thresholds
 PROMOTE_RATIO = 0.80          # "high-usage day" = >= 80% of the Normal cap

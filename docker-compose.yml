@@ -1,15 +1,296 @@
-# K-GPT — local/VPS deployment. DB is Supabase (managed), so only app services here.
+# ===========================================================================
+# Prompt Pulse (K-GPT) — Production Docker Compose
+# All services on one host, suitable for up to ~500 users on Hetzner CPX41.
+#
+# Services:
+#   postgres    — primary relational DB (replaces managed Supabase)
+#   redis       — caching, rate limiting, session memory, circuit breaker state
+#   qdrant      — vector database for RAG retrieval (replaces pgvector at scale)
+#   rabbitmq    — async task queue for document pipeline, memory aging, analytics
+#   neo4j       — knowledge graph (concepts, courses, mastery, recommendations)
+#   backend     — FastAPI application (2 uvicorn workers)
+#   worker      — background task consumer (embeddings, chunking, memory aging)
+#   frontend    — Next.js 14 production build
+#   prometheus  — metrics collection
+#   grafana     — dashboards and alerting
+# ===========================================================================
+
 services:
+  # =========================================================================
+  # PostgreSQL 16 — self-hosted, replaces Supabase
+  # WHY: Full control over extensions (pgvector, pg_trgm), connection pooling,
+  #      no vendor lock-in, no row/bandwidth limits. Same schema, direct access.
+  # =========================================================================
+  postgres:
+    image: pgvector/pgvector:pg16        # PostgreSQL 16 with pgvector pre-installed
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: promptpulse
+      POSTGRES_USER: pp_admin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_in_production}
+    ports:
+      - "127.0.0.1:5432:5432"            # local only, not exposed to internet
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./deployment/postgres/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pp_admin -d promptpulse"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+  # =========================================================================
+  # Redis 7 — caching + shared state
+  # WHY: In-memory store for 4 things the current in-process dicts can't do
+  #      across multiple backend replicas:
+  #      1. Response/semantic/embedding/prompt caching (saves 30-40% LLM costs)
+  #      2. Rate limiting counters (fairuse.py currently uses process-local dicts)
+  #      3. Circuit breaker state (smart_router.py _fail_counts / _open_until)
+  #      4. Session memory (ephemeral conversation state, Layer 1 of memory)
+  # =========================================================================
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: >
+      redis-server
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --appendonly yes
+      --requirepass ${REDIS_PASSWORD:-change_me_in_production}
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-change_me_in_production}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 600M
+
+  # =========================================================================
+  # Qdrant — vector database for RAG
+  # WHY: Replaces pgvector (memory_chunks table) for retrieval at scale.
+  #      pgvector IVFFlat rebuilds are blocking; Qdrant uses HNSW (no rebuild,
+  #      sub-50ms search at 1M vectors). Supports payload filtering (user_id,
+  #      project_id, kind) and quantization (4x memory savings). pgvector
+  #      stays for backward compat during migration.
+  # =========================================================================
+  qdrant:
+    image: qdrant/qdrant:v1.12.5
+    restart: unless-stopped
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:-change_me_in_production}
+    ports:
+      - "127.0.0.1:6333:6333"            # REST API
+      - "127.0.0.1:6334:6334"            # gRPC (faster for bulk operations)
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:6333/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+  # =========================================================================
+  # RabbitMQ 3 — async task queue
+  # WHY: Current doc upload/embed/memory extraction is either synchronous
+  #      (blocks request) or fire-and-forget asyncio.Tasks (lost on restart).
+  #      RabbitMQ gives: persistent messages, dead-letter retries, backpressure,
+  #      and decoupled worker scaling. Queues: document pipeline stages,
+  #      memory aging, analytics events, knowledge graph updates.
+  # =========================================================================
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: pp_rabbit
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-change_me_in_production}
+    ports:
+      - "127.0.0.1:5672:5672"            # AMQP protocol
+      - "127.0.0.1:15672:15672"          # management UI (http://localhost:15672)
+    volumes:
+      - rabbit_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_running"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 300M
+
+  # =========================================================================
+  # Neo4j Community — knowledge graph
+  # WHY: Models relationships that relational DBs handle poorly:
+  #      Student→ENROLLED_IN→Course, Concept→DEPENDS_ON→Concept,
+  #      Student→MASTERED→Concept. Powers recommendation engine
+  #      ("what should this student learn next?"), prerequisite checking,
+  #      and cross-course concept linking. Community Edition is free (GPLv3).
+  # =========================================================================
+  neo4j:
+    image: neo4j:5-community
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-change_me_in_production}
+      NEO4J_PLUGINS: '[]'
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 1g
+      NEO4J_server_memory_pagecache_size: 256m
+    ports:
+      - "127.0.0.1:7474:7474"            # browser UI (http://localhost:7474)
+      - "127.0.0.1:7687:7687"            # Bolt protocol
+    volumes:
+      - neo4j_data:/data
+      - ./deployment/neo4j/init.cypher:/var/lib/neo4j/import/init.cypher:ro
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p ${NEO4J_PASSWORD:-change_me_in_production} 'RETURN 1' || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 1500M
+
+  # =========================================================================
+  # Backend — FastAPI (existing, now connecting to self-hosted services)
+  # =========================================================================
   backend:
     build: ./backend
     env_file: ./backend/.env
-    ports: ["8400:8400"]
+    environment:
+      # Override Supabase with self-hosted Postgres (existing code still works
+      # via supabase_client.py during migration; new code uses postgres_client.py)
+      DATABASE_URL: postgresql+asyncpg://pp_admin:${POSTGRES_PASSWORD:-change_me_in_production}@postgres:5432/promptpulse
+      DATABASE_URL_SYNC: postgresql://pp_admin:${POSTGRES_PASSWORD:-change_me_in_production}@postgres:5432/promptpulse
+      REDIS_URL: redis://:${REDIS_PASSWORD:-change_me_in_production}@redis:6379/0
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: 6333
+      QDRANT_API_KEY: ${QDRANT_API_KEY:-change_me_in_production}
+      RABBITMQ_URL: amqp://pp_rabbit:${RABBITMQ_PASSWORD:-change_me_in_production}@rabbitmq:5672/
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-change_me_in_production}
+    ports:
+      - "8400:8400"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     restart: unless-stopped
 
+  # =========================================================================
+  # Worker — background task consumer
+  # WHY: Decouples heavy processing (embedding, chunking, reranking, memory
+  #      aging) from the request path. Same codebase, different entrypoint.
+  # =========================================================================
+  worker:
+    build: ./backend
+    env_file: ./backend/.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://pp_admin:${POSTGRES_PASSWORD:-change_me_in_production}@postgres:5432/promptpulse
+      DATABASE_URL_SYNC: postgresql://pp_admin:${POSTGRES_PASSWORD:-change_me_in_production}@postgres:5432/promptpulse
+      REDIS_URL: redis://:${REDIS_PASSWORD:-change_me_in_production}@redis:6379/0
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: 6333
+      QDRANT_API_KEY: ${QDRANT_API_KEY:-change_me_in_production}
+      RABBITMQ_URL: amqp://pp_rabbit:${RABBITMQ_PASSWORD:-change_me_in_production}@rabbitmq:5672/
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-change_me_in_production}
+      RUN_SCHEDULER: "1"                  # only one instance runs the nightly cron
+    command: ["python", "-m", "app.worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # =========================================================================
+  # Frontend — Next.js production build (existing)
+  # =========================================================================
   frontend:
     build: ./frontend
     environment:
       - NEXT_PUBLIC_API_URL=http://backend:8400
-    ports: ["3000:3000"]
+    ports:
+      - "3000:3000"
     depends_on: [backend]
     restart: unless-stopped
+
+  # =========================================================================
+  # Prometheus — metrics scraping
+  # WHY: Collects time-series metrics from the backend (request latency,
+  #      LLM costs, cache hit rates, error rates). Free, industry standard.
+  #      Grafana reads from Prometheus for dashboards and alerts.
+  # =========================================================================
+  prometheus:
+    image: prom/prometheus:v2.54.0
+    restart: unless-stopped
+    volumes:
+      - ./deployment/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom_data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=30d"
+      - "--storage.tsdb.retention.size=2GB"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/healthy || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # =========================================================================
+  # Grafana — dashboards and alerting
+  # WHY: Visualizes Prometheus metrics into actionable dashboards: system
+  #      overview, LLM cost tracking, RAG performance, user activity.
+  #      Free open-source version is fully sufficient.
+  # =========================================================================
+  grafana:
+    image: grafana/grafana:11.2.0
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_INSTALL_PLUGINS: ""
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./deployment/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "127.0.0.1:3001:3000"            # Grafana on 3001 to avoid Next.js conflict
+    depends_on: [prometheus]
+
+# ===========================================================================
+# Persistent volumes — survive container restarts and rebuilds
+# ===========================================================================
+volumes:
+  pg_data:          # PostgreSQL data directory
+  redis_data:       # Redis AOF persistence
+  qdrant_data:      # Qdrant vector storage + indexes
+  rabbit_data:      # RabbitMQ message persistence
+  neo4j_data:       # Neo4j graph storage
+  prom_data:        # Prometheus time-series data (30 day retention)
+  grafana_data:     # Grafana dashboards and user preferences

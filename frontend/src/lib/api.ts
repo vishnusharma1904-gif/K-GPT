@@ -178,6 +178,10 @@ export const api = {
       messages: (userId: string, sessionId: string) =>
         req(`/api/admin/monitor/users/${userId}/sessions/${sessionId}`),
     },
+    knowledge: {
+      list: () => req("/api/admin/knowledge"),
+      remove: (source: string) => req(`/api/admin/knowledge?source=${encodeURIComponent(source)}`, { method: "DELETE" }),
+    },
     incidents: () => req("/api/status/incidents"),
     createIncident: (b: any) => req("/api/status/incidents", { method: "POST", body: JSON.stringify(b) }),
     updateIncident: (id: string, b: any) => req(`/api/status/incidents/${id}`, { method: "PATCH", body: JSON.stringify(b) }),
@@ -185,11 +189,12 @@ export const api = {
 };
 
 // Multipart file upload (P29)
-export async function uploadFile(file: File, projectId?: string) {
+export async function uploadFile(file: File, projectId?: string, shared = false) {
   const token = getToken();
   const fd = new FormData();
   fd.append("file", file);
   if (projectId) fd.append("project_id", projectId);
+  if (shared) fd.append("shared", "true");
   const res = await fetch(`${BASE}/api/upload`, {
     method: "POST",
     headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },

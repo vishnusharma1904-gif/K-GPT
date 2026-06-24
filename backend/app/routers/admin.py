@@ -10,11 +10,35 @@ from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.core.security import require_admin
+from app.core.config import get_settings
 from app.db import supabase_client as db
+from app.db import qdrant_client
 from app.services import entitlements, safety
 from app.services import quota_policy as qp
 
+settings = get_settings()
 router = APIRouter(prefix="/api/admin", tags=["admin"])
+
+
+# --- Shared knowledge base (admin-managed institution documents) ------------
+@router.get("/knowledge")
+async def list_knowledge(_: dict = Depends(require_admin)):
+    """List documents in the institution-wide shared knowledge base."""
+    if settings.qdrant_host:
+        return {"documents": qdrant_client.list_shared_documents()}
+    return {"documents": db.list_shared_documents()}
+
+
+@router.delete("/knowledge")
+async def delete_knowledge(source: str, _: dict = Depends(require_admin)):
+    """Remove a document (all its chunks) from the shared knowledge base."""
+    if not source:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "source is required")
+    if settings.qdrant_host:
+        qdrant_client.delete_shared_document(source)
+        return {"ok": True, "source": source}
+    removed = db.delete_shared_document(source)
+    return {"ok": True, "source": source, "chunks_removed": removed}
 
 
 # --- request bodies ---------------------------------------------------------

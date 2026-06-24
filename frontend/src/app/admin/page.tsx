@@ -8,7 +8,7 @@ import Link from "next/link";
 import { api, getToken, clearToken } from "@/lib/api";
 import AdminOps from "@/components/AdminOps";
 import SereneBackdrop from "@/components/SereneBackdrop";
-import { Users, Check, Zap, Coins, LogOut, RotateCcw, Gift, Ban, ShieldCheck, RefreshCw, ShieldAlert, Eye } from "lucide-react";
+import { Users, Check, Zap, Coins, LogOut, RotateCcw, Gift, Ban, ShieldCheck, RefreshCw, ShieldAlert, Eye, Database } from "lucide-react";
 
 export default function AdminPage() {
   const router = useRouter();
@@ -59,6 +59,7 @@ export default function AdminPage() {
       <div className="mb-8 flex items-center justify-between">
         <div className="flex items-center gap-3"><Logo /><Badge className="bg-brand/15 text-brand">Admin</Badge></div>
         <div className="flex gap-2">
+          <Link href="/admin/knowledge"><Button variant="outline" size="sm"><Database size={15} /> Knowledge</Button></Link>
           <Link href="/admin/monitor"><Button variant="outline" size="sm"><ShieldAlert size={15} /> Monitor</Button></Link>
           <Link href="/admin/analytics"><Button variant="outline" size="sm">Analytics</Button></Link>
           <Button variant="outline" size="sm" disabled={busy}

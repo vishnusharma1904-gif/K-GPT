@@ -1,75 +1,64 @@
 "use client";
 /* =============================================================================
  *  K-GPT · AuthShell
- *  Shared wrapper for auth screens: the live divine 3D canvas behind an
- *  ethereal glass card. Keeps each page focused on its own form/logic.
+ *  Shared wrapper for auth screens: uses the lightweight SereneBackdrop instead
+ *  of heavy WebGL to preserve battery on low-end devices.
  * ========================================================================== */
 
-import dynamic from "next/dynamic";
 import Link from "next/link";
 import type { ReactNode } from "react";
-import type { BiomeKey } from "@/components/divine/Landscape";
+import SereneBackdrop from "@/components/SereneBackdrop";
 
-const DivineCanvas = dynamic(() => import("@/components/divine/DivineCanvas"), {
-  ssr: false,
-  loading: () => null,
-});
-
-const TITLE_SHADOW = "0 1px 2px rgba(3,16,28,0.6)";
-const TEXT_SHADOW = "0 1px 3px rgba(3,16,28,0.55)";
-
-/** Reusable ethereal field styles for auth forms. */
-export const authLabel = "block text-xs font-medium uppercase tracking-wide text-white/70";
+export const authLabel = "block text-xs font-medium uppercase tracking-wide text-fg/70";
 export const authInput =
-  "w-full rounded-xl border border-white/15 bg-white/10 px-3.5 py-2.5 text-sm text-white placeholder:text-white/40 backdrop-blur-md transition-colors focus:border-white/40 focus:bg-white/15 focus:outline-none";
+  "w-full rounded-xl border border-border bg-surface-2/60 px-3.5 py-2.5 text-sm text-fg placeholder:text-muted backdrop-blur-md transition-colors focus:border-brand/40 focus:bg-surface focus:outline-none";
 export const authButton =
-  "w-full rounded-xl bg-white/90 px-4 py-2.5 text-sm font-semibold text-slate-900 transition-colors hover:bg-white disabled:opacity-60";
+  "btn-shine w-full rounded-xl bg-fg px-4 py-2.5 text-sm font-semibold text-bg transition-colors hover:opacity-90 disabled:opacity-60";
 export const authError =
-  "rounded-lg border border-red-300/25 bg-red-500/15 px-3 py-2 text-sm text-red-50";
+  "rounded-lg border border-danger/25 bg-danger/15 px-3 py-2 text-sm text-danger";
 
 export default function AuthShell({
-  biome = "forests",
+  children,
   title,
   subtitle,
-  children,
   footer,
+  showBack = true,
 }: {
-  biome?: BiomeKey;
+  children: ReactNode;
   title: string;
   subtitle?: ReactNode;
-  children: ReactNode;
   footer?: ReactNode;
+  showBack?: boolean;
 }) {
   return (
-    <main className="relative min-h-screen overflow-hidden bg-[#050b12] text-white">
-      <div className="fixed inset-0 z-0">
-        <DivineCanvas biome={biome} />
-        <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-black/30 via-black/10 to-black/55" />
-      </div>
+    <main className="relative min-h-screen overflow-hidden">
+      <SereneBackdrop />
 
       <header className="relative z-20 flex items-center justify-between px-6 py-5 sm:px-10">
-        <Link href="/" className="text-lg font-semibold tracking-[0.12em]" style={{ textShadow: TITLE_SHADOW }}>
+        <Link href="/" className="text-lg font-semibold tracking-[0.12em] text-fg">
           K&nbsp;GPT
         </Link>
-        <Link href="/" className="text-sm text-white/80 transition-colors hover:text-white" style={{ textShadow: TEXT_SHADOW }}>
-          ← Home
-        </Link>
+        {showBack && (
+          <Link href="/" className="text-sm text-muted transition-colors hover:text-fg">
+            ← Home
+          </Link>
+        )}
       </header>
 
       <div className="relative z-10 flex min-h-[calc(100vh-76px)] items-center justify-center px-6 pb-16">
         <div className="w-full max-w-md animate-rise">
-          <div className="overflow-hidden rounded-3xl border border-white/12 bg-[#0a1420]/55 p-8 shadow-[0_40px_120px_-40px_rgba(2,10,20,0.9)] backdrop-blur-2xl">
-            <h1 className="font-serif text-3xl font-medium tracking-tight" style={{ textShadow: TITLE_SHADOW }}>
+          <div className="glass-strong overflow-hidden rounded-3xl p-8">
+            <h1 className="font-serif text-3xl font-medium tracking-tight text-fg">
               {title}
             </h1>
             {subtitle && (
-              <p className="mt-2 text-sm text-white/70" style={{ textShadow: TEXT_SHADOW }}>
+              <p className="mt-2 text-sm text-muted">
                 {subtitle}
               </p>
             )}
             <div className="mt-6">{children}</div>
             {footer && (
-              <div className="mt-6 text-center text-sm text-white/70" style={{ textShadow: TEXT_SHADOW }}>
+              <div className="mt-6 text-center text-sm text-muted">
                 {footer}
               </div>
             )}

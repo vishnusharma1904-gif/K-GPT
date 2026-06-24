@@ -30,8 +30,9 @@ _PRICING = _CATALOG["pricing_per_1m"]
 _PROVIDER_ENV = _CATALOG["provider_env"]
 
 # --- circuit breaker state ---------------------------------------------------
+# Trip counts stay process-local (a few stray failures per replica is fine), but
+# the OPEN/CLOSED decision lives in Redis so every replica shares one view.
 _fail_counts: dict[str, int] = defaultdict(int)
-_open_until: dict[str, float] = {}
 _latency: dict[str, deque] = defaultdict(lambda: deque(maxlen=20))
 
 _TRIP_AFTER = 3
@@ -108,20 +109,16 @@ def _has_key(model: str) -> bool:
     return bool(os.getenv(env)) if env else True
 
 
+from app.db import redis_client
+
 def _circuit_open(model: str) -> bool:
-    until = _open_until.get(model, 0)
-    if until and time.time() < until:
-        return True
-    if until and time.time() >= until:
-        _open_until.pop(model, None)
-        _fail_counts[model] = 0
-    return False
+    return redis_client.circuit_is_open(model)
 
 
 def _record_fail(model: str) -> None:
     _fail_counts[model] += 1
     if _fail_counts[model] >= _TRIP_AFTER:
-        _open_until[model] = time.time() + _OPEN_SECONDS
+        redis_client.circuit_trip(model, _OPEN_SECONDS)
 
 
 def _record_ok(model: str, dt: float) -> None:
@@ -188,8 +185,13 @@ def build_chain(category: str, allow_premium: bool) -> list[str]:
 
 async def complete(messages: list[dict], *, category: str = "fast_chat",
                    allow_premium: bool = False, temperature: float = 0.7,
-                   max_tokens: int | None = None, model: str | None = None) -> dict[str, Any]:
-    """Non-streaming completion with failover. Returns text + usage + model."""
+                   max_tokens: int | None = None, model: str | None = None,
+                   response_format: dict | None = None) -> dict[str, Any]:
+    """Non-streaming completion with failover. Returns text + usage + model.
+
+    `response_format={"type": "json_object"}` forces structured JSON output on
+    providers that support it (others silently drop it via litellm.drop_params).
+    """
     chain = _explicit_chain(model) if model else build_chain(category, allow_premium)
     last_err: Exception | None = None
     for model in chain:
@@ -198,6 +200,8 @@ async def complete(messages: list[dict], *, category: str = "fast_chat",
             kwargs = {"model": model, "messages": messages, "temperature": temperature}
             if max_tokens:
                 kwargs["max_tokens"] = max_tokens
+            if response_format:
+                kwargs["response_format"] = response_format
             resp = await litellm.acompletion(**kwargs)
             _record_ok(model, time.time() - t0)
             usage = resp.usage
@@ -265,7 +269,7 @@ async def stream(messages: list[dict], *, category: str = "fast_chat",
 
 def health() -> dict[str, Any]:
     return {
-        "open_circuits": list(_open_until.keys()),
+        "open_circuits": redis_client.list_open_circuits(),
         "p50_latency": {m: round(sorted(d)[len(d) // 2], 3)
                         for m, d in _latency.items() if d},
     }

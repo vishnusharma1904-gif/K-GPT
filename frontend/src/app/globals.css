@@ -15,19 +15,21 @@
   --radius: 14px;
   color-scheme: light;
 
-  /* Light theme — serene nature: misty dawn, forest, teal water, warm sun */
-  --bg: 170 30% 97%;
-  --bg-2: 192 34% 93%;
-  --surface: 160 30% 99%;
-  --surface-2: 168 26% 95%;
-  --border: 166 18% 87%;
+  /* Light theme — Morning Mist & Waterfall */
+  --bg: 180 20% 98%;
+  --bg-2: 160 25% 94%;
+  --surface: 180 30% 100%;
+  --surface-2: 168 26% 96%;
+  --border: 166 20% 88%;
   --fg: 196 34% 12%;
-  --muted: 192 12% 38%;
-  --brand: 162 52% 40%;
-  --brand-2: 188 66% 42%;
+  --muted: 192 12% 40%;
+  
+  --brand: 165 60% 35%;     /* Deep Forest Green */
+  --brand-2: 195 70% 40%;   /* Waterfall Cyan */
   --brand-fg: 0 0% 100%;
-  --accent: 38 92% 52%;
-  --accent-2: 150 54% 44%;
+  
+  --accent: 45 90% 50%;     /* Morning Sun */
+  --accent-2: 150 54% 44%;  /* Leaf Green */
   --danger: 6 72% 52%;
   --success: 150 58% 38%;
   --warning: 36 92% 48%;
@@ -36,48 +38,60 @@
   --halo: 168 60% 40%;
   --shadow-color: 195 40% 18%;
   --glass-tint: 165 40% 99%;
-  --glass-opacity: 0.62;
-  --grain-opacity: 0.02;
+  --glass-opacity: 0.70;
+  --grain-opacity: 0.03;
 }
 
 .dark {
   color-scheme: dark;
-  /* Serene nature dusk — deep teal-forest, emerald glass, warm sun accents */
-  --bg: 196 34% 6%;
-  --bg-2: 188 38% 8%;
-  --surface: 196 26% 9%;
+  /* Dark theme — Midnight Mountain & Deep Forest */
+  --bg: 210 30% 6%;         /* Midnight Mountain Blue */
+  --bg-2: 175 40% 8%;       /* Deep Forest Shadows */
+  --surface: 200 26% 9%;
   --surface-2: 194 22% 13%;
-  --border: 190 18% 19%;
+  --border: 190 20% 20%;
   --fg: 168 28% 96%;
   --muted: 185 14% 66%;
-  --brand: 160 62% 52%;
-  --brand-2: 186 72% 52%;
+  
+  --brand: 160 65% 45%;     /* Bioluminescent Fern */
+  --brand-2: 190 75% 55%;   /* Moonlit Waterfall */
   --brand-fg: 192 60% 7%;
-  --accent: 40 92% 62%;
-  --accent-2: 150 58% 52%;
+  
+  --accent: 40 95% 65%;     /* Firefly Gold */
+  --accent-2: 150 60% 55%;  /* Emerald Canopy */
   --danger: 4 78% 64%;
   --success: 150 60% 50%;
   --warning: 38 92% 60%;
 
   --glow: 172 70% 50%;
   --halo: 168 70% 48%;
-  --shadow-color: 196 60% 2%;
-  --glass-tint: 194 34% 13%;
-  --glass-opacity: 0.5;
-  --grain-opacity: 0.035;
+  --shadow-color: 210 50% 2%;
+  --glass-tint: 200 34% 12%;
+  --glass-opacity: 0.55;
+  --grain-opacity: 0.04;
 }
 
 * { border-color: hsl(var(--border)); }
 
 html { scroll-behavior: smooth; }
 
+/* Nature-Inspired CSS-only Animated Background */
+@keyframes ambient-drift {
+  0% { background-position: 0% 0%, 100% 100%, 50% 50%, 0 0; }
+  50% { background-position: 100% 50%, 0% 50%, 25% 75%, 0 0; }
+  100% { background-position: 0% 0%, 100% 100%, 50% 50%, 0 0; }
+}
+
 body {
   position: relative;
+  /* Layers of radial mist mimicking waterfalls, canopies, and mountain peaks */
   background:
-    radial-gradient(1400px 760px at 14% -12%, hsl(var(--brand) / 0.18), transparent 56%),
-    radial-gradient(1200px 620px at 100% -6%, hsl(var(--accent) / 0.16), transparent 52%),
-    radial-gradient(1100px 820px at 50% 122%, hsl(var(--accent-2) / 0.16), transparent 62%),
-    linear-gradient(180deg, hsl(var(--bg)), hsl(var(--bg-2)));
+    radial-gradient(circle at 15% 20%, hsl(var(--brand) / 0.15) 0%, transparent 40%),
+    radial-gradient(circle at 85% 80%, hsl(var(--brand-2) / 0.15) 0%, transparent 40%),
+    radial-gradient(circle at 50% 110%, hsl(var(--accent) / 0.10) 0%, transparent 50%),
+    linear-gradient(170deg, hsl(var(--bg)), hsl(var(--bg-2)));
+  background-size: 200% 200%, 200% 200%, 150% 150%, 100% 100%;
+  animation: ambient-drift 30s ease-in-out infinite;
   background-attachment: fixed;
   color: hsl(var(--fg));
   font-family: var(--font-sans), system-ui, sans-serif;
@@ -94,7 +108,7 @@ body::after {
   content: "";
   position: fixed;
   inset: 0;
-  z-index: 9999;
+  z-index: -1; /* Placed behind the main UI content so it acts purely as a texture */
   pointer-events: none;
   opacity: var(--grain-opacity);
   background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");

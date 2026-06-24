@@ -67,6 +67,24 @@ function CodeBlock({ className, children }: any) {
   );
 }
 
+/** Normalise LaTeX delimiters so KaTeX renders regardless of which style the
+ *  model emits: \(...\) -> $...$ (inline) and \[...\] -> $$...$$ (display).
+ *  remark-math only understands $ / $$, so models that use the \( \[ style
+ *  would otherwise show raw. Skips fenced code blocks. */
+function normalizeMath(src: string): string {
+  if (!src) return src;
+  const parts = src.split(/(```[\s\S]*?```|`[^`]*`)/g);
+  return parts
+    .map((seg, i) =>
+      i % 2 === 1 // odd segments are code (kept verbatim)
+        ? seg
+        : seg
+            .replace(/\\\[([\s\S]+?)\\\]/g, (_m, e) => `$$${e}$$`)
+            .replace(/\\\(([\s\S]+?)\\\)/g, (_m, e) => `$${e}$`)
+    )
+    .join("");
+}
+
 export function Markdown({ content }: { content: string }) {
   return (
     <div className="prose-chat text-sm">
@@ -75,7 +93,7 @@ export function Markdown({ content }: { content: string }) {
         rehypePlugins={[rehypeKatex, [rehypeHighlight, { detect: true, ignoreMissing: true }]]}
         components={{ code: CodeBlock as any }}
       >
-        {content}
+        {normalizeMath(content)}
       </ReactMarkdown>
     </div>
   );

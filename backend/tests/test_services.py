@@ -97,7 +97,41 @@ def test_auto_memory_parses_facts():
 
 
 def test_embed_degrades_gracefully():
-    # sentence-transformers may be unavailable; embed must still return a 384-vec.
+    # With no FIREWORKS_API_KEY / Redis in CI, embed must still return a 768-vec.
     from app.services import embeddings
     v = embeddings.embed("hello")
-    assert isinstance(v, list) and len(v) == 384
+    assert isinstance(v, list) and len(v) == 768
+
+
+# --- Quota policy constants (regression guards for the Prompt Pulse migration) -
+def test_cap_for_tier_covers_all_tiers():
+    from app.services import quota_policy as qp
+    assert qp.cap_for_tier("normal") == qp.NORMAL_DAILY_CAP
+    assert qp.cap_for_tier("heavy") == qp.HEAVY_DAILY_CAP
+    # 'monthly' must not raise NameError — the constant has to exist.
+    assert qp.cap_for_tier("monthly") == qp.MONTHLY_DAILY_CAP
+    assert qp.cap_for_tier("anything_else") == qp.NORMAL_DAILY_CAP
+
+
+def test_weekly_cap_defined():
+    from app.services import quota_policy as qp
+    assert qp.WEEKLY_CAP >= qp.NORMAL_DAILY_CAP
+
+
+# --- Chunking ---------------------------------------------------------------
+def test_chunk_text_basic_and_overlap():
+    from app.services import chunking
+    assert chunking.chunk_text("") == []
+    text = ("Sentence one. " * 200).strip()
+    chunks = chunking.chunk_text(text, max_tokens=100, overlap_tokens=20)
+    assert len(chunks) > 1
+    assert all(c.strip() for c in chunks)
+
+
+# --- Reranker degrades without an API key -----------------------------------
+def test_reranker_degrades_gracefully():
+    from app.services import reranker
+    out = reranker.rerank("q", ["a", "b", "c"], top_k=2)
+    # No key in CI → returns indices in order, length capped at top_k.
+    assert isinstance(out, list) and len(out) <= 2
+    assert all(isinstance(i, int) for i, _ in out)

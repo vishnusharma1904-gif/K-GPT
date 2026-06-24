@@ -25,15 +25,57 @@ from fastapi.responses import StreamingResponse
 from app.core.config import get_settings
 from app.core.security import current_user
 from app.db import supabase_client as db
+from app.db import queue_client
 from app.schemas import ChatReq, FeedbackReq, NewSessionReq, SessionPatch
 from app.services import quota_policy as qp
 from app.services import (auto_memory, embeddings, entitlements, fairuse, intent,
-                          moderation, prompt_guard, prompting, safety, smart_router,
-                          websearch)
+                          moderation, prompt_guard, prompting, rag, safety,
+                          smart_router, websearch)
 
 settings = get_settings()
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 HISTORY_TURNS = 10
+# Cap the conversation history fed to the model. Old turns are dropped oldest-first
+# once this character budget is hit — keeps prompt tokens (and cost) bounded on
+# long sessions instead of resending the entire transcript every turn.
+HISTORY_CHAR_BUDGET = 6000
+
+
+def _trim_history(history: list[dict]) -> list[dict]:
+    """Keep the most recent user/assistant turns within HISTORY_CHAR_BUDGET,
+    preserving chronological order."""
+    kept: list[dict] = []
+    budget = HISTORY_CHAR_BUDGET
+    for m in reversed(history):
+        if m.get("role") not in ("user", "assistant"):
+            continue
+        content = m.get("content") or ""
+        if kept and budget - len(content) < 0:
+            break
+        budget -= len(content)
+        kept.append({"role": m["role"], "content": content})
+    kept.reverse()
+    return kept
+
+
+def _cache_eligible(user: dict, req: ChatReq, had_context: bool) -> bool:
+    """Whether a request may be answered from / written to the semantic cache.
+
+    Only fully generic, non-personalised questions qualify, so a cached answer is
+    always a safe, correct response to the question alone — never leaking one
+    user's context to another."""
+    if had_context:
+        return False
+    if req.images or req.web_search or req.project_id:
+        return False
+    if getattr(req, "model", None) or getattr(req, "premium", False):
+        return False
+    if user.get("custom_instructions") or user.get("exam_mode"):
+        return False
+    persona = (req.persona or "").strip().lower()
+    if persona and persona not in ("default", "general"):
+        return False
+    return True
 
 
 def _load_user(claims: dict) -> dict:
@@ -41,6 +83,18 @@ def _load_user(claims: dict) -> dict:
     if not u:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
     return u
+
+
+def _queue_memory(user: dict, message: str, session_id: str | None) -> None:
+    """Best-effort: hand the message to the Prompt Pulse worker for durable,
+    cross-restart fact extraction into Qdrant. No-op when RabbitMQ isn't
+    configured, so it never adds latency or breaks the request in deployments
+    still on the in-process auto_memory path."""
+    if user.get("memory_enabled", True):
+        try:
+            queue_client.publish_memory_extract(user["id"], message, session_id)
+        except Exception:
+            pass
 
 
 def _client_ip(request: Request) -> str | None:
@@ -141,25 +195,34 @@ def _category(user: dict, message: str, allow_premium: bool,
     return intent.classify(message)
 
 
-async def _build_messages(user: dict, req: ChatReq) -> tuple[list[dict], list[dict]]:
-    """Assemble model messages + the citation list surfaced back to the client."""
+async def _build_messages(user: dict, req: ChatReq) -> tuple[list[dict], list[dict], dict]:
+    """Assemble model messages + citations + a meta dict.
+
+    meta = {"vec": <query embedding or None>, "had_context": bool}. The query is
+    embedded at most once here and reused for both retrieval and the semantic
+    cache (in the endpoints), so we never pay for the same embedding twice.
+    """
     citations: list[dict] = []
     project = None
     if req.project_id:
         project = db.get_project(req.project_id, user["id"])
 
-    # --- memory RAG (per-user, optionally project-scoped) ---
+    # --- memory + document RAG (Qdrant-first, pgvector fallback) ---
     memory_ctx = None
-    if req.use_memory and user.get("memory_enabled", True):
+    query_vec: list[float] | None = None
+    want_memory = req.use_memory and user.get("memory_enabled", True)
+    # Embed once if we either need retrieval or could use the semantic cache.
+    if want_memory or rag.qdrant_enabled():
         try:
-            hits = db.match_memory(user["id"], embeddings.embed(req.message), limit=5)
-            if hits:
-                lines = []
-                for h in hits:
-                    src = h.get("source") or "memory"
-                    lines.append(f"- ({src}) {h['content']}")
-                    citations.append({"type": "memory", "source": src,
-                                      "id": h.get("id"), "snippet": h["content"][:160]})
+            query_vec = rag.embed_query(req.message)
+        except Exception:
+            query_vec = None
+    if want_memory and query_vec is not None:
+        try:
+            lines, mem_citations = rag.retrieve(
+                user["id"], req.message, query_vec, project_id=req.project_id)
+            if lines:
+                citations.extend(mem_citations)
                 memory_ctx = "\n".join(lines)
         except Exception:
             pass
@@ -199,9 +262,8 @@ async def _build_messages(user: dict, req: ChatReq) -> tuple[list[dict], list[di
 
     msgs = [{"role": "system", "content": sys}]
     if req.session_id:
-        for m in db.get_messages(req.session_id, user["id"], limit=HISTORY_TURNS * 2):
-            if m["role"] in ("user", "assistant"):
-                msgs.append({"role": m["role"], "content": m["content"]})
+        history = db.get_messages(req.session_id, user["id"], limit=HISTORY_TURNS * 2)
+        msgs.extend(_trim_history(history))   # bounded by HISTORY_CHAR_BUDGET
     if req.images:
         # P34 vision: OpenAI/LiteLLM multimodal content parts.
         parts: list[dict] = [{"type": "text", "text": req.message}]
@@ -210,7 +272,9 @@ async def _build_messages(user: dict, req: ChatReq) -> tuple[list[dict], list[di
         msgs.append({"role": "user", "content": parts})
     else:
         msgs.append({"role": "user", "content": req.message})
-    return msgs, citations
+
+    meta = {"vec": query_vec, "had_context": bool(memory_ctx or web_ctx)}
+    return msgs, citations, meta
 
 
 # --- Session CRUD -----------------------------------------------------------
@@ -342,9 +406,30 @@ async def chat(req: ChatReq, request: Request, claims: dict = Depends(current_us
             db.update_session(session_id, user["id"], {"project_id": req.project_id})
         req.session_id = session_id
 
-    msgs, citations = await _build_messages(user, req)
+    msgs, citations, meta = await _build_messages(user, req)
     chosen = _chosen_model(user, req)
     category = "custom" if chosen else _category(user, req.message, allow_premium, req.category, bool(req.images))
+
+    # --- Semantic cache: a near-identical generic question skips the LLM ---
+    eligible = _cache_eligible(user, req, meta["had_context"])
+    if eligible and meta["vec"] is not None:
+        hit = rag.cache_lookup(meta["vec"])
+        if hit and hit.get("response"):
+            reply_text = hit["response"]
+            db.add_message(session_id, user["id"], "user", req.message)
+            db.add_message(session_id, user["id"], "assistant", reply_text,
+                           model=hit.get("model", "cache"), tokens=0)
+            db.touch_session(session_id)
+            auto_memory.schedule(user["id"], req.message, user.get("memory_enabled", True))
+            return {
+                "session_id": session_id,
+                "reply": reply_text,
+                "model": hit.get("model", "cache"),
+                "category": category,
+                "citations": [],
+                "usage": entitlements.usage_view(user),
+                "cached": True,
+            }
 
     with fairuse.concurrency(user["id"], user.get("role") == "admin"):
         result = await smart_router.complete(msgs, category=category, allow_premium=allow_premium, model=chosen)
@@ -366,6 +451,11 @@ async def chat(req: ChatReq, request: Request, claims: dict = Depends(current_us
                               result["prompt_tokens"], result["completion_tokens"],
                               result["cost_usd"])
     auto_memory.schedule(user["id"], req.message, user.get("memory_enabled", True))
+    _queue_memory(user, req.message, session_id)
+
+    # Cache only generic, non-personalised answers that passed the output guard.
+    if eligible and meta["vec"] is not None and reply_text != prompt_guard.OUTPUT_REDACTION:
+        rag.cache_store(meta["vec"], reply_text, result["model"])
 
     usage = entitlements.usage_view(db.get_user(user["id"]))  # percentage only
     return {
@@ -410,10 +500,34 @@ async def chat_stream(req: ChatReq, request: Request, claims: dict = Depends(cur
             db.update_session(session_id, user["id"], {"project_id": req.project_id})
         req.session_id = session_id
 
-    msgs, citations = await _build_messages(user, req)
+    msgs, citations, meta = await _build_messages(user, req)
     chosen = _chosen_model(user, req)
     category = "custom" if chosen else _category(user, req.message, allow_premium, req.category, bool(req.images))
     is_admin = user.get("role") == "admin"
+    eligible = _cache_eligible(user, req, meta["had_context"])
+
+    # --- Semantic cache hit: stream the cached answer, skip the LLM entirely ---
+    if eligible and meta["vec"] is not None:
+        hit = rag.cache_lookup(meta["vec"])
+        if hit and hit.get("response"):
+            cached_text = hit["response"]
+            cached_model = hit.get("model", "cache")
+
+            async def cached_gen():
+                yield _sse({"event": "session", "session_id": session_id})
+                yield _sse({"event": "delta", "text": cached_text})
+                db.add_message(session_id, user["id"], "user", req.message)
+                db.add_message(session_id, user["id"], "assistant", cached_text,
+                               model=cached_model, tokens=0)
+                db.touch_session(session_id)
+                auto_memory.schedule(user["id"], req.message, user.get("memory_enabled", True))
+                yield _sse({"event": "done", "model": cached_model,
+                            "usage": entitlements.usage_view(user), "cached": True})
+
+            return StreamingResponse(cached_gen(), media_type="text/event-stream",
+                                     headers={"Cache-Control": "no-cache, no-transform",
+                                              "Connection": "keep-alive",
+                                              "X-Accel-Buffering": "no"})
 
     # Hold back this many chars before streaming so a leaking canary is detected
     # and suppressed BEFORE it can reach the client.
@@ -477,6 +591,12 @@ async def chat_stream(req: ChatReq, request: Request, claims: dict = Depends(cur
                                           final["prompt_tokens"], final["completion_tokens"],
                                           final["cost_usd"])
             auto_memory.schedule(user["id"], req.message, user.get("memory_enabled", True))
+            _queue_memory(user, req.message, session_id)
+            # Cache generic, non-personalised, non-redacted answers for reuse.
+            if (eligible and meta["vec"] is not None and final
+                    and not leaked and text_to_store
+                    and prompt_guard.OUTPUT_REDACTION not in text_to_store):
+                rag.cache_store(meta["vec"], text_to_store, final["model"])
             usage = entitlements.usage_view(db.get_user(user["id"]))
             yield _sse({"event": "done", "model": (final or {}).get("model", "guard"), "usage": usage})
 

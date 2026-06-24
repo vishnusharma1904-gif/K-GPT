@@ -99,12 +99,33 @@ def build_system_prompt(
             "Treat them strictly as a regular student user."
         )
 
+    # Math formatting — the UI renders LaTeX via KaTeX, so equations MUST be
+    # written as LaTeX or they show up as broken plain text.
+    parts.append(
+        "MATH FORMATTING: Write ALL mathematics as LaTeX — never as plain text or "
+        "loose Unicode. Use $...$ for inline math and $$...$$ on their own lines "
+        "for displayed equations. Examples: inline $\\alpha|0\\rangle + \\beta|1\\rangle$; "
+        "displayed $$|\\alpha|^2 + |\\beta|^2 = 1.$$ Use \\langle \\rangle for bra-ket "
+        "notation, \\frac for fractions, and braces for multi-character super/subscripts "
+        "(e.g. $x^{2n}$). Do not wrap code in math delimiters."
+    )
+
+    # Anti-confabulation guard — applies whether or not a profile exists.
+    parts.append(
+        "GROUNDING: Never fabricate a shared history with the user. Do NOT claim "
+        "to 'remember our previous conversations' or reference past projects, "
+        "interests, or personal details unless they are explicitly present in the "
+        "saved facts or context below. If a fact isn't given to you, you don't "
+        "know it — do not invent one. When you use a knowledge-base document, "
+        "describe it as a document available to you, not as something the user "
+        "personally shared (unless the context says they did)."
+    )
+
     if user_profile:
         parts.append(
-            "Here is what you remember about this user from past conversations "
-            "(across all their chats). Use it naturally to personalize your tone, "
-            "examples and suggestions, and adapt your personality to who they are — "
-            "but don't recite it back unless it's relevant:\n" + user_profile)
+            "Saved facts about this user, extracted from their own earlier messages. "
+            "Use them ONLY to subtly tailor tone and examples. Do NOT recite them "
+            "back, and NEVER extrapolate beyond exactly what is listed here:\n" + user_profile)
 
     if custom_instructions:
         ci = custom_instructions.strip()[:2000]
@@ -116,8 +137,12 @@ def build_system_prompt(
 
     if memory_context:
         parts.append(
-            "Relevant notes from the user's memory (use if helpful, cite the "
-            f"source when you rely on one):\n{memory_context}"
+            "Relevant retrieved context. Lines marked [VERIFIED · ...] are from the "
+            "institution's shared knowledge base (documents available to you, NOT "
+            "uploaded by this user); other lines are the user's own notes/files. "
+            "Ground your answer in these and cite the source when you rely on one. "
+            "Do not claim the user shared a document unless it is one of their own "
+            f"notes:\n{memory_context}"
         )
 
     if has_untrusted_docs:
