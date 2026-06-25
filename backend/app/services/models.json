@@ -1,19 +1,22 @@
 {
   "_comment": "K-GPT model registry \u2014 cheap-first MoE/light routing. Costs USD per 1M tokens (in/out). Exotic models route via OpenRouter (one key) so the chain stays resilient; SmartRouter circuit-breaks any decommissioned/unavailable id and fails over automatically.",
+  "_zenmux_note": "Models prefixed `zenmux/<vendor>/<model>` route through the ZenMux OpenAI-compatible gateway (needs ZENMUX_API_KEY). IMPORTANT: confirm each slug on https://zenmux.ai/models (format vendor/model, e.g. google/gemini-3.1-pro-preview) and adjust if a call fails \u2014 if a key is missing or a slug is wrong, SmartRouter automatically falls back to the next model in the chain, so nothing breaks.",
   "categories": {
     "instant": {
-      "_desc": "Ultra-cheap, sub-second chat \u2014 short/simple turns, near-cap downshift.",
-      "primary": "groq/llama-3.1-8b-instant",
+      "_desc": "Ultra-cheap, sub-second chat \u2014 ZenMux free model first, then Groq.",
+      "primary": "zenmux/z-ai/glm-4.7-flashx",
       "fallbacks": [
+        "groq/llama-3.1-8b-instant",
         "groq/gemma2-9b-it",
         "gemini/gemini-1.5-flash-8b",
         "openai/gpt-4o-mini"
       ]
     },
     "fast_chat": {
-      "_desc": "Default everyday chat \u2014 cheap 1x models first; 70B only as last resort.",
-      "primary": "gemini/gemini-2.0-flash",
+      "_desc": "Default everyday chat \u2014 ZenMux free model first, then robust fallbacks.",
+      "primary": "zenmux/z-ai/glm-4.7-flash",
       "fallbacks": [
+        "gemini/gemini-2.0-flash",
         "deepseek/deepseek-chat",
         "groq/llama-3.1-8b-instant",
         "groq/gemma2-9b-it",
@@ -21,77 +24,86 @@
       ]
     },
     "reasoning": {
-      "_desc": "Deep STEM/logic \u2014 DeepSeek primary, strong cheap fallbacks.",
-      "primary": "deepseek/deepseek-chat",
+      "_desc": "Deep STEM/logic \u2014 ZenMux free DeepSeek V4 Pro first, strong fallbacks.",
+      "primary": "zenmux/deepseek/deepseek-v4-pro",
       "fallbacks": [
+        "deepseek/deepseek-chat",
         "groq/llama-3.3-70b-versatile",
         "gemini/gemini-2.0-flash",
-        "openrouter/qwen/qwen-2.5-72b-instruct",
-        "fireworks_ai/accounts/fireworks/models/mixtral-8x22b-instruct"
+        "openrouter/qwen/qwen-2.5-72b-instruct"
       ]
     },
     "coding": {
-      "_desc": "Code gen/debug \u2014 DeepSeek Coder + Qwen Coder + Codestral.",
-      "primary": "deepseek/deepseek-coder",
+      "_desc": "Code gen/debug \u2014 ZenMux Kimi K2.7 Code first, then DeepSeek Coder.",
+      "primary": "zenmux/moonshotai/kimi-k2.7-code",
       "fallbacks": [
+        "deepseek/deepseek-coder",
         "openrouter/qwen/qwen-2.5-coder-32b-instruct",
         "mistral/codestral-latest",
         "groq/llama-3.3-70b-versatile"
       ]
     },
     "multilingual": {
-      "_desc": "Telugu / Tenglish / mixed \u2014 Qwen excels; Gemini multimodal backstop.",
-      "primary": "openrouter/qwen/qwen-2.5-72b-instruct",
+      "_desc": "Indian languages / mixed \u2014 ZenMux Qwen3.7-Max first; strong fallbacks.",
+      "primary": "zenmux/qwen/qwen3.7-max",
       "fallbacks": [
+        "openrouter/qwen/qwen-2.5-72b-instruct",
         "gemini/gemini-2.0-flash",
         "groq/llama-3.3-70b-versatile"
       ]
     },
     "vision": {
-      "_desc": "Image/diagram understanding.",
-      "primary": "gemini/gemini-2.0-flash",
+      "_desc": "Image/diagram understanding \u2014 ZenMux free vision first, Gemini fallback.",
+      "primary": "zenmux/z-ai/glm-4.6v-flash",
       "fallbacks": [
+        "gemini/gemini-2.0-flash",
         "openai/gpt-4o-mini",
         "gemini/gemini-1.5-flash-8b"
       ]
     },
     "long_context": {
-      "_desc": "Big PDFs/codebases \u2014 128k\u20131M context.",
-      "primary": "gemini/gemini-2.0-flash",
+      "_desc": "Big PDFs/codebases \u2014 ZenMux Qwen3.7-Plus first, Gemini fallback.",
+      "primary": "zenmux/qwen/qwen3.7-plus",
       "fallbacks": [
+        "gemini/gemini-2.0-flash",
         "openrouter/ai21/jamba-1-5-mini",
         "mistral/open-mistral-nemo",
         "openrouter/moonshotai/kimi-k2"
       ]
     },
     "tool_use": {
-      "_desc": "Function calling / routing (Phase 37).",
-      "primary": "groq/llama3-groq-8b-8192-tool-use-preview",
+      "_desc": "Function calling / routing \u2014 ZenMux first, Groq tool model fallback.",
+      "primary": "zenmux/deepseek/deepseek-v4-pro",
       "fallbacks": [
+        "groq/llama3-groq-8b-8192-tool-use-preview",
         "openai/gpt-4o-mini",
         "groq/llama-3.3-70b-versatile"
       ]
     },
     "rag": {
-      "_desc": "Cited answers over memory/docs \u2014 Command R cites natively.",
-      "primary": "cohere/command-r",
+      "_desc": "Cited answers over memory/docs \u2014 ZenMux first, Command R fallback.",
+      "primary": "zenmux/deepseek/deepseek-v4-pro",
       "fallbacks": [
+        "cohere/command-r",
         "gemini/gemini-2.0-flash",
         "groq/llama-3.3-70b-versatile"
       ]
     },
     "background": {
-      "_desc": "Internal jobs \u2014 chat titles, intent, summaries. Tiniest/cheapest.",
-      "primary": "nvidia_nim/nvidia/nemotron-mini-4b-instruct",
+      "_desc": "Internal jobs \u2014 chat titles, intent, summaries. ZenMux free first.",
+      "primary": "zenmux/stepfun/step-3.7-flash",
       "fallbacks": [
+        "nvidia_nim/nvidia/nemotron-mini-4b-instruct",
         "groq/llama-3.1-8b-instant",
         "groq/gemma2-9b-it"
       ]
     },
     "premium": {
-      "_desc": "Opt-in best \u2014 still cost-controlled (gpt-4o-mini lead).",
-      "primary": "openai/gpt-4o-mini",
+      "_desc": "Opt-in best \u2014 ZenMux-discounted Claude Sonnet 4.6 lead, cost-controlled.",
+      "primary": "zenmux/anthropic/claude-sonnet-4.6",
       "fallbacks": [
+        "zenmux/z-ai/glm-5.2",
+        "openai/gpt-4o-mini",
         "gemini/gemini-2.5-flash",
         "anthropic/claude-3-5-sonnet-20241022"
       ]
@@ -269,9 +281,20 @@
     "fireworks_ai/accounts/fireworks/models/deepseek-v4-flash": {
       "in": 0.14,
       "out": 0.28
-    }
+    },
+    "zenmux/z-ai/glm-4.7-flash": { "in": 0, "out": 0 },
+    "zenmux/z-ai/glm-4.7-flashx": { "in": 0, "out": 0 },
+    "zenmux/z-ai/glm-4.6v-flash": { "in": 0, "out": 0 },
+    "zenmux/deepseek/deepseek-v4-pro": { "in": 0, "out": 0 },
+    "zenmux/stepfun/step-3.7-flash": { "in": 0, "out": 0 },
+    "zenmux/moonshotai/kimi-k2.7-code": { "in": 0.5, "out": 2.0 },
+    "zenmux/qwen/qwen3.7-max": { "in": 0.3, "out": 1.2 },
+    "zenmux/qwen/qwen3.7-plus": { "in": 0.2, "out": 0.8 },
+    "zenmux/z-ai/glm-5.2": { "in": 0.3, "out": 1.0 },
+    "zenmux/anthropic/claude-sonnet-4.6": { "in": 0.3, "out": 0.31 }
   },
   "provider_env": {
+    "zenmux": "ZENMUX_API_KEY",
     "groq": "GROQ_API_KEY",
     "gemini": "GEMINI_API_KEY",
     "openai": "OPENAI_API_KEY",

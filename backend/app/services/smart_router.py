@@ -39,12 +39,31 @@ _TRIP_AFTER = 3
 _OPEN_SECONDS = 120
 _PREMIUM_OUT_THRESHOLD = 2.0  # USD / 1M output tokens → gated behind premium
 
+# ZenMux is an OpenAI-compatible gateway. Catalog ids of the form
+# `zenmux/<vendor>/<model>` are sent to its endpoint via litellm's openai
+# provider with a custom api_base, unlocking ZenMux's cheap/free model lineup
+# through a single key.
+_ZENMUX_BASE = "https://zenmux.ai/api/v1"
+
+
+def _is_zenmux(model: str) -> bool:
+    return model.startswith("zenmux/")
+
+
+def _litellm_target(model: str) -> tuple[str, dict]:
+    """Map a catalog model id to (litellm_model, extra_kwargs)."""
+    if _is_zenmux(model):
+        slug = model[len("zenmux/"):]
+        return f"openai/{slug}", {"api_base": _ZENMUX_BASE, "api_key": os.getenv("ZENMUX_API_KEY", "")}
+    return model, {}
+
+
 # Providers a paid/admin user may explicitly pick from (Phase 21 model picker).
-SELECTABLE_PROVIDERS = {"groq", "gemini", "mistral", "fireworks_ai", "openrouter"}
+SELECTABLE_PROVIDERS = {"groq", "gemini", "mistral", "fireworks_ai", "openrouter", "zenmux"}
 
 _PRETTY_PROVIDER = {
     "groq": "Groq", "gemini": "Google Gemini", "mistral": "Mistral",
-    "fireworks_ai": "Fireworks AI", "openrouter": "OpenRouter",
+    "fireworks_ai": "Fireworks AI", "openrouter": "OpenRouter", "zenmux": "ZenMux",
 }
 
 
@@ -197,7 +216,8 @@ async def complete(messages: list[dict], *, category: str = "fast_chat",
     for model in chain:
         t0 = time.time()
         try:
-            kwargs = {"model": model, "messages": messages, "temperature": temperature}
+            lm, extra = _litellm_target(model)
+            kwargs = {"model": lm, "messages": messages, "temperature": temperature, **extra}
             if max_tokens:
                 kwargs["max_tokens"] = max_tokens
             if response_format:
@@ -214,6 +234,7 @@ async def complete(messages: list[dict], *, category: str = "fast_chat",
                 "cost_usd": _cost(model, p_tok, c_tok),
             }
         except Exception as e:  # noqa: BLE001
+            print(f"[router] model '{model}' failed: {type(e).__name__}: {e}")
             _record_fail(model)
             last_err = e
             continue
@@ -229,8 +250,9 @@ async def stream(messages: list[dict], *, category: str = "fast_chat",
     for model in chain:
         t0 = time.time()
         try:
-            kwargs = {"model": model, "messages": messages,
-                      "temperature": temperature, "stream": True}
+            lm, extra = _litellm_target(model)
+            kwargs = {"model": lm, "messages": messages,
+                      "temperature": temperature, "stream": True, **extra}
             if max_tokens:
                 kwargs["max_tokens"] = max_tokens
             resp = await litellm.acompletion(**kwargs)
@@ -261,6 +283,7 @@ async def stream(messages: list[dict], *, category: str = "fast_chat",
             }}
             return
         except Exception as e:  # noqa: BLE001
+            print(f"[router] stream model '{model}' failed: {type(e).__name__}: {e}")
             _record_fail(model)
             last_err = e
             continue

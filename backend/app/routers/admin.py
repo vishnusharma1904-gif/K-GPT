@@ -73,7 +73,16 @@ def _admin_view(u: dict) -> dict:
         "bonus_balance": u.get("bonus_balance"),
         "plan": u.get("plan"), "monitored": safety.is_monitored(u),
         "percent_used": qp.percent_used(u.get("daily_used") or 0, cap),
+        "course": u.get("course"), "branch": u.get("branch"),
+        "section": u.get("section"), "admission_year": u.get("admission_year"),
+        "department": u.get("department"),
+        "year": _cohort_year(u)[0], "semester": _cohort_year(u)[1],
     }
+
+
+def _cohort_year(u: dict):
+    from app.services import cohort
+    return cohort.derive(u.get("admission_year"), u.get("course"))
 
 
 # --- overview ---------------------------------------------------------------
@@ -184,10 +193,18 @@ class BulkActivateBody(_BM):
 
 @router.get("/users/search")
 async def users_search(q: str | None = None, tier: str | None = None,
-                       sub_status: str | None = None, _: dict = Depends(require_admin)):
-    """Cohort/section filtering + free-text search over name/email/roll (P44)."""
+                       sub_status: str | None = None,
+                       year: int | None = None, semester: int | None = None,
+                       section: str | None = None, course: str | None = None,
+                       branch: str | None = None,
+                       _: dict = Depends(require_admin)):
+    """Cohort/section filtering + free-text search over name/email/roll (P44).
+    Filter by year / semester / section / course / branch to target a cohort."""
     rows = db.list_users(limit=5000)
     ql = (q or "").lower().strip()
+    sec = (section or "").upper().strip()
+    crs = (course or "").lower().strip()
+    brn = (branch or "").lower().strip()
     out = []
     for u in rows:
         if ql and ql not in (
@@ -197,8 +214,53 @@ async def users_search(q: str | None = None, tier: str | None = None,
             continue
         if sub_status and u.get("sub_status") != sub_status:
             continue
+        if year is not None and u.get("year") != year:
+            continue
+        if semester is not None and u.get("semester") != semester:
+            continue
+        if sec and (u.get("section") or "").upper() != sec:
+            continue
+        if crs and crs not in (u.get("course") or "").lower():
+            continue
+        if brn and brn not in (u.get("branch") or "").lower():
+            continue
         out.append(_admin_view(u))
     return {"count": len(out), "users": out}
+
+
+class StudentProfileBody(_BM):
+    full_name: str | None = None
+    roll_no: str | None = None
+    course: str | None = None
+    branch: str | None = None
+    admission_year: int | None = Field(default=None, ge=2000, le=2100)
+    section: str | None = None
+    department: str | None = None
+
+
+@router.patch("/users/{user_id}/profile")
+async def set_student_profile(user_id: str, body: StudentProfileBody,
+                              _: dict = Depends(require_admin)):
+    """Admin-only edit of a student's identity/cohort fields. Students cannot
+    change these themselves after onboarding — they request changes here."""
+    patch: dict = {}
+    if body.full_name is not None:
+        patch["full_name"] = body.full_name.strip() or None
+    if body.roll_no is not None:
+        patch["roll_no"] = (body.roll_no.strip().upper() or None)
+    if body.course is not None:
+        patch["course"] = body.course.strip() or None
+    if body.branch is not None:
+        patch["branch"] = (body.branch.strip().upper() or None)
+    if body.admission_year is not None:
+        patch["admission_year"] = body.admission_year
+    if body.section is not None:
+        patch["section"] = (body.section.strip().upper() or None)
+    if body.department is not None:
+        patch["department"] = body.department.strip() or None
+    if patch:
+        db.update_user(user_id, patch)
+    return {"ok": True, "user_id": user_id, **patch}
 
 
 @router.get("/analytics")

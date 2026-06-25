@@ -71,18 +71,18 @@ async def process_document(data: dict) -> None:
         chunks = chunking.chunk_text(text, max_tokens=400, overlap_tokens=50)
         print(f"[worker] Document split into {len(chunks)} chunks.")
 
-        # 3. Embed & 4. Store
-        chunk_dicts = []
-        for i, chunk_text in enumerate(chunks):
-            # We don't batch embeddings here yet to keep it simple, but we could
-            emb = embeddings.embed(chunk_text)
-            chunk_dicts.append({
+        # 3. Embed (batched — one network call per _BATCH_SIZE chunks) & 4. Store
+        vectors = embeddings.embed_many(chunks)
+        chunk_dicts = [
+            {
                 "index": i,
                 "content": chunk_text,
-                "embedding": emb,
+                "embedding": vectors[i],
                 "source": filename,
-                "metadata": {"length": len(chunk_text)}
-            })
+                "metadata": {"length": len(chunk_text)},
+            }
+            for i, chunk_text in enumerate(chunks)
+        ]
 
         stored_count = qdrant_client.upsert_chunks(
             document_id=document_id,

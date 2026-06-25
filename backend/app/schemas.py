@@ -35,6 +35,25 @@ class VerifyReq(BaseModel):
     token: str
 
 
+class VerifyOtpReq(BaseModel):
+    email: EmailStr
+    code: str = Field(min_length=4, max_length=8)
+
+
+class ResendOtpReq(BaseModel):
+    email: EmailStr
+
+
+class AuthResp(BaseModel):
+    """Unified signup/login response. When otp_required is True the caller must
+    collect the emailed OTP and call /verify-otp; no access_token is issued yet."""
+    otp_required: bool = False
+    email: EmailStr | None = None
+    access_token: str | None = None
+    token_type: str = "bearer"
+    user: dict | None = None
+
+
 # --- Chat -------------------------------------------------------------------
 class ChatReq(BaseModel):
     message: str = Field(min_length=1, max_length=8000)
@@ -47,6 +66,7 @@ class ChatReq(BaseModel):
     project_id: str | None = None   # P20 / P30
     images: list[str] | None = None  # P34 vision: data URLs or https image URLs
     model: str | None = None         # P21 explicit model pick (paid/admin only)
+    strict: bool = False             # KB-only: answer solely from retrieved documents
 
 
 class NewSessionReq(BaseModel):
@@ -96,6 +116,15 @@ class PrefsReq(BaseModel):
     exam_mode: bool | None = None
     memory_enabled: bool | None = None
     web_search_enabled: bool | None = None
+    # Student classification (cohort: course / branch / year / semester / section)
+    full_name: str | None = Field(default=None, max_length=80)
+    roll_no: str | None = Field(default=None, max_length=32)
+    course: str | None = Field(default=None, max_length=32)
+    branch: str | None = Field(default=None, max_length=48)
+    admission_year: int | None = Field(default=None, ge=2000, le=2100)
+    year: int | None = Field(default=None, ge=1, le=5)
+    semester: int | None = Field(default=None, ge=1, le=10)
+    section: str | None = Field(default=None, max_length=8)
 
 
 # --- Billing ----------------------------------------------------------------

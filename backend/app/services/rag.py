@@ -40,17 +40,61 @@ _CACHE_MIN_REPLY_CHARS = 40
 
 SHARED_TOP_K = 4        # institution-wide verified docs pulled per query
 
+# --- Learned-answer reuse ----------------------------------------------------
+# Related (not identical) past answers are pulled in so the model can REUSE the
+# overlapping part (e.g. a definition already answered for another user) and only
+# generate the genuinely new part of the question.
+LEARNED_TOP_K = 2
+LEARNED_MIN_SCORE = 0.74   # related, but clearly below the 0.97 exact-serve bar
+LEARNED_SNIPPET = 700
+
 
 def qdrant_enabled() -> bool:
     return bool(get_settings().qdrant_host)
 
 
+def retrieval_possible() -> bool:
+    """Whether grounding retrieval can run at all. Embeddings require a Fireworks
+    key; without it every vector is zero and retrieval returns nothing, so we can
+    skip the work entirely. Shared-KB retrieval lives in both the Qdrant and the
+    pgvector paths, so this — not `qdrant_enabled()` — is the right gate for it."""
+    return bool(get_settings().fireworks_api_key)
+
+
+def retrieve_learned(vec: list[float]) -> list[str]:
+    """Related past answers (institutional 'answer memory') to reuse for the
+    overlapping part of a new question. Returns context lines, or [] on miss.
+    Qdrant-only and never raises."""
+    if not qdrant_enabled():
+        return []
+    try:
+        hits = qdrant_client.cache_search_related(
+            vec, limit=LEARNED_TOP_K, min_score=LEARNED_MIN_SCORE)
+    except Exception:
+        return []
+    lines: list[str] = []
+    for h in hits:
+        ans = (h.get("response") or "")[:LEARNED_SNIPPET].strip()
+        if not ans:
+            continue
+        q = (h.get("question") or "").strip()
+        lines.append(f'- (already answered before — "{q}"): {ans}' if q
+                     else f"- (already answered before): {ans}")
+    return lines
+
+
 def retrieve_shared(vec: list[float]) -> list[dict[str, Any]]:
     """Institution-wide, admin-verified knowledge base — visible to ALL users.
-    Qdrant when configured, else legacy pgvector. Never raises."""
+    Qdrant when configured, else legacy pgvector. Never raises.
+
+    Gated by `kb_relevance_threshold`: chunks must be genuinely similar to the
+    query to be returned, so off-topic / non-educational queries get nothing
+    (no document citations) instead of the nearest few chunks regardless."""
+    thr = get_settings().kb_relevance_threshold
     try:
         if qdrant_enabled():
-            return qdrant_client.search_shared_documents(vec, limit=SHARED_TOP_K)
+            return qdrant_client.search_shared_documents(
+                vec, limit=SHARED_TOP_K, score_threshold=thr)
         return db.match_shared_memory(vec, limit=SHARED_TOP_K)
     except Exception:
         return []
@@ -63,33 +107,43 @@ def embed_query(query: str) -> list[float]:
 
 
 def retrieve(user_id: str, query: str, vec: list[float],
-             project_id: str | None = None) -> tuple[list[str], list[dict[str, Any]]]:
+             project_id: str | None = None, *,
+             include_personal: bool = True,
+             include_shared: bool = True) -> tuple[list[str], list[dict[str, Any]]]:
     """Return (context_lines, citations) grounding the answer.
 
     Qdrant-first: reranked document chunks + memory facts. Falls back to the
     legacy pgvector memory match when Qdrant isn't configured. `vec` is the
     pre-computed query embedding, passed in to avoid re-embedding.
+
+    The two sources are gated independently so the caller can serve the
+    institution-wide shared KB to EVERY user (it is not personal data) while only
+    pulling the user's own documents/memory when they have personal memory on.
     """
     lines: list[str] = []
     citations: list[dict[str, Any]] = []
 
     # --- Institution knowledge base FIRST: admin-verified docs every user sees.
     #     Ranked at the top so the model grounds its answer on them before
-    #     anything else. ---
-    for h in retrieve_shared(vec):
-        src = h.get("source") or "knowledge base"
-        snippet = (h.get("content") or "")[:DOC_SNIPPET_CHARS]
-        if not snippet:
-            continue
-        lines.append(f"- [VERIFIED · {src}] {snippet}")
-        citations.append({"type": "knowledge", "source": src,
-                          "id": h.get("id"), "snippet": snippet[:160]})
+    #     anything else. Decoupled from the personal-memory toggle on purpose. ---
+    if include_shared:
+        for h in retrieve_shared(vec):
+            src = h.get("source") or "knowledge base"
+            snippet = (h.get("content") or "")[:DOC_SNIPPET_CHARS]
+            if not snippet:
+                continue
+            lines.append(f"- [VERIFIED · {src}] {snippet}")
+            citations.append({"type": "knowledge", "source": src,
+                              "id": h.get("id"), "snippet": snippet[:160]})
+
+    if not include_personal:
+        return lines, citations
 
     if qdrant_enabled():
         # --- Uploaded documents: dense retrieve, then cross-encoder rerank ---
         candidates = qdrant_client.search_documents(
             query_embedding=vec, user_id=user_id, project_id=project_id,
-            limit=DOC_FETCH_K, score_threshold=0.3,
+            limit=DOC_FETCH_K, score_threshold=get_settings().kb_relevance_threshold,
         )
         if candidates:
             scored = reranker.rerank(query, [c["content"] for c in candidates],
@@ -130,9 +184,10 @@ def cache_lookup(vec: list[float]) -> dict | None:
 
 
 def cache_store(vec: list[float], reply: str, model: str,
-                institution_id: str = "ksrmce") -> None:
-    """Persist a generic answer for future cache hits. Callers must only pass
+                institution_id: str = "ksrmce", question: str = "") -> None:
+    """Persist a generic answer (with its question) for future exact-serve cache
+    hits AND for partial-reuse of related questions. Callers must only pass
     NON-personalised answers (see chat._cache_eligible)."""
     if not qdrant_enabled() or not reply or len(reply) < _CACHE_MIN_REPLY_CHARS:
         return
-    qdrant_client.cache_store(vec, reply, model, institution_id)
+    qdrant_client.cache_store(vec, reply, model, institution_id, question=question)

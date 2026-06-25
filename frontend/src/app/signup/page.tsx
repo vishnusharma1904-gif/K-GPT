@@ -3,6 +3,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import AuthShell, { authLabel, authInput, authButton, authError } from "@/components/AuthShell";
+import OtpStep from "@/components/OtpStep";
 import { api, setToken } from "@/lib/api";
 
 export default function SignupPage() {
@@ -10,23 +11,34 @@ export default function SignupPage() {
   const [form, setForm] = useState({ full_name: "", email: "", password: "" });
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(false);
+  const [otpEmail, setOtpEmail] = useState("");
   const set = (k: string) => (e: any) => setForm({ ...form, [k]: e.target.value });
+
+  function finish(r: any) {
+    setToken(r.access_token);
+    const u = r.user;
+    if (u.role === "admin") router.push("/admin");
+    else if (!u.profile_complete) router.push("/onboarding");
+    else router.push("/account");
+  }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setErr(""); setLoading(true);
     try {
       const r = await api.signup(form);
-      setToken(r.access_token);
-      router.push(r.user.role === "admin" ? "/admin" : "/account");
+      if (r.otp_required) { setOtpEmail(r.email); return; }
+      finish(r);
     } catch (e: any) { setErr(e.message); } finally { setLoading(false); }
   }
 
   return (
     <AuthShell
       biome="forests"
-      title="Create your account"
-      subtitle={<>Use your <span className="font-medium text-white">@ksrmce.ac.in</span> college email.</>}
+      title={otpEmail ? "Verify your email" : "Create your account"}
+      subtitle={otpEmail
+        ? <>Enter the code we emailed you to finish signing up.</>
+        : <>Use your <span className="font-medium text-white">@ksrmce.ac.in</span> college email.</>}
       footer={
         <>
           Already have an account?{" "}
@@ -36,6 +48,9 @@ export default function SignupPage() {
         </>
       }
     >
+      {otpEmail ? (
+        <OtpStep email={otpEmail} onVerified={finish} />
+      ) : (
       <form onSubmit={submit} className="space-y-4">
         <div className="space-y-1.5">
           <label className={authLabel}>Full name</label>
@@ -54,6 +69,7 @@ export default function SignupPage() {
           {loading ? "Creating…" : "Create account"}
         </button>
       </form>
+      )}
     </AuthShell>
   );
 }

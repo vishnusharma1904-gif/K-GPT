@@ -1,6 +1,14 @@
 "use client";
 
-const BASE = process.env.NEXT_PUBLIC_API_URL || "";
+export const BASE = process.env.NEXT_PUBLIC_API_URL || "";
+
+/** Resolve a server-relative asset path (e.g. an extracted figure URL) to an
+ *  absolute URL the browser can load against the API origin. */
+export function assetUrl(path: string): string {
+  if (!path) return path;
+  if (/^https?:\/\//.test(path)) return path;
+  return `${BASE}${path}`;
+}
 
 export function getToken(): string | null {
   if (typeof window === "undefined") return null;
@@ -10,7 +18,8 @@ export function setToken(t: string) { window.localStorage.setItem("kgpt_token", 
 export function clearToken() { window.localStorage.removeItem("kgpt_token"); }
 
 // Pages that should never trigger an auth redirect.
-const PUBLIC_PATHS = ["/login", "/signup", "/forgot", "/reset", "/verify", "/s/", "/"];
+const PUBLIC_PATHS = ["/login", "/signup", "/forgot", "/reset", "/verify", "/s/",
+  "/about", "/contact", "/pricing", "/privacy", "/terms", "/refund", "/"];
 
 /** Clear the session and bounce to login on an expired/invalid token, so a 401
  *  becomes a clean redirect instead of an unhandled "Not authenticated" error. */
@@ -50,6 +59,8 @@ export const api = {
   login: (b: any) => req("/api/auth/login", { method: "POST", body: JSON.stringify(b) }),
   me: () => req("/api/auth/me"),
   verifyEmail: (token: string) => req("/api/auth/verify", { method: "POST", body: JSON.stringify({ token }) }),
+  verifyOtp: (email: string, code: string) => req("/api/auth/verify-otp", { method: "POST", body: JSON.stringify({ email, code }) }),
+  resendOtp: (email: string) => req("/api/auth/resend-otp", { method: "POST", body: JSON.stringify({ email }) }),
   resendVerification: () => req("/api/auth/resend-verification", { method: "POST" }),
   forgot: (email: string) => req("/api/auth/forgot", { method: "POST", body: JSON.stringify({ email }) }),
   reset: (token: string, password: string) => req("/api/auth/reset", { method: "POST", body: JSON.stringify({ token, password }) }),
@@ -150,6 +161,7 @@ export const api = {
     analytics: (days = 14) => req(`/api/admin/analytics?days=${days}`),
     log: (id: string) => req(`/api/admin/users/${id}/log`),
     grantAccess: (id: string, months = 6) => req(`/api/admin/users/${id}/grant-access?months=${months}`, { method: "POST" }),
+    setProfile: (id: string, body: any) => req(`/api/admin/users/${id}/profile`, { method: "PATCH", body: JSON.stringify(body) }),
     grantPlan: (ids: string[], plan: string) => req("/api/admin/grant-plan", { method: "POST", body: JSON.stringify({ user_ids: ids, plan }) }),
     resetDaily: (ids: string[]) => req("/api/admin/entitlements/reset-daily", { method: "POST", body: JSON.stringify({ user_ids: ids }) }),
     grantTokens: (ids: string[], tokens: number) => req("/api/admin/entitlements/grant-tokens", { method: "POST", body: JSON.stringify({ user_ids: ids, tokens }) }),

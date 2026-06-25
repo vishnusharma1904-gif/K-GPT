@@ -7,11 +7,21 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from app.core.security import current_user
 from app.db import supabase_client as db
 from app.schemas import PrefsReq
-from app.services import entitlements, prompting
+from app.services import cohort, entitlements, prompting
 
 router = APIRouter(prefix="/api/account", tags=["account"])
 
 _VALID_STYLES = set(prompting.STYLES.keys())
+
+# Fields a (non-admin) student must fill before using K-GPT. Year/semester are
+# DERIVED from admission_year + the calendar, so they are not collected directly.
+_REQUIRED_PROFILE = ("full_name", "roll_no", "course", "branch", "admission_year", "section")
+
+
+def profile_complete(u: dict) -> bool:
+    if u.get("role") == "admin":
+        return True
+    return all(u.get(k) not in (None, "") for k in _REQUIRED_PROFILE)
 
 
 @router.get("/usage")
@@ -36,12 +46,22 @@ async def claim_bonus(claims: dict = Depends(current_user)):
 @router.get("/preferences")
 async def get_prefs(claims: dict = Depends(current_user)):
     u = db.get_user(claims["user_id"]) or {}
+    cy, cs = cohort.derive(u.get("admission_year"), u.get("course"))
     return {
         "response_style": u.get("response_style", "balanced"),
         "custom_instructions": u.get("custom_instructions"),
         "exam_mode": bool(u.get("exam_mode")),
         "memory_enabled": bool(u.get("memory_enabled", True)),
         "web_search_enabled": bool(u.get("web_search_enabled")),
+        "full_name": u.get("full_name"),
+        "roll_no": u.get("roll_no"),
+        "course": u.get("course"),
+        "branch": u.get("branch"),
+        "section": u.get("section"),
+        "admission_year": u.get("admission_year"),
+        "year": cy,
+        "semester": cs,
+        "profile_complete": profile_complete(u),
         "styles": sorted(_VALID_STYLES),
     }
 
@@ -61,9 +81,27 @@ async def set_prefs(req: PrefsReq, claims: dict = Depends(current_user)):
         patch["memory_enabled"] = req.memory_enabled
     if req.web_search_enabled is not None:
         patch["web_search_enabled"] = req.web_search_enabled
+    # Academic/identity fields: a student may set each ONCE (during onboarding),
+    # after which it is locked — only an admin can change it (students contact the
+    # admin). So we only accept a value here when the field is currently empty.
+    u = db.get_user(claims["user_id"]) or {}
+    if req.full_name is not None and not u.get("full_name"):
+        patch["full_name"] = req.full_name.strip() or None
+    if req.roll_no is not None and not u.get("roll_no"):
+        patch["roll_no"] = (req.roll_no.strip().upper() or None)
+    if req.course is not None and not u.get("course"):
+        patch["course"] = req.course.strip() or None
+    if req.branch is not None and not u.get("branch"):
+        patch["branch"] = (req.branch.strip().upper() or None)
+    if req.admission_year is not None and not u.get("admission_year"):
+        patch["admission_year"] = req.admission_year
+    if req.section is not None and not u.get("section"):
+        patch["section"] = (req.section.strip().upper() or None)
     if patch:
-        db.update_user(claims["user_id"], patch)
-    return {"ok": True, **patch}
+        updated = db.update_user(claims["user_id"], patch)
+    else:
+        updated = db.get_user(claims["user_id"]) or {}
+    return {"ok": True, "profile_complete": profile_complete(updated), **patch}
 
 
 # --- Billing history (P17) --------------------------------------------------

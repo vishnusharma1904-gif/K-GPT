@@ -19,6 +19,8 @@ PyMuPDF==1.24.13          # PDF text extraction (P29)
 python-docx==1.1.2        # DOCX extraction (P29)
 python-pptx==1.0.2        # PPTX extraction (P29)
 openpyxl==3.1.5           # XLSX extraction (P29)
+pytesseract==0.3.13       # OCR for scanned PDFs/images (§6.4) — needs the `tesseract` binary
+Pillow==10.4.0            # image handling for OCR + figure extraction (§6.1/§6.4)
 sentry-sdk==2.19.2        # observability (P5, optional)
 pytest==8.3.4             # tests (P6)
 # --- Prompt Pulse Phase 1 ---

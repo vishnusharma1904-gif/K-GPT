@@ -17,7 +17,7 @@ from app.core.config import get_settings
 from app.core.security import current_user
 from app.db import qdrant_client
 from app.db import supabase_client as db
-from app.services import embeddings, extract, moderation
+from app.services import embeddings, extract, figures, moderation
 
 settings = get_settings()
 router = APIRouter(prefix="/api/upload", tags=["upload"])
@@ -32,11 +32,15 @@ def _store_chunks(user_id: str, chunks: list[str], filename: str | None,
 
     When `shared=True` the chunks go into the institution-wide knowledge base
     (admin-verified, retrievable by every user). Returns (stored_count, last_error)."""
+    # Embed every chunk up front in batched calls (≈2 requests for a 120-chunk
+    # file instead of 120 sequential ones).
+    vectors = embeddings.embed_many(chunks)
+
     if settings.qdrant_host:
         try:
             document_id = str(uuid.uuid4())
             chunk_dicts = [
-                {"index": i, "content": c, "embedding": embeddings.embed(c),
+                {"index": i, "content": c, "embedding": vectors[i],
                  "source": filename, "metadata": {"length": len(c)}}
                 for i, c in enumerate(chunks)
             ]
@@ -50,13 +54,13 @@ def _store_chunks(user_id: str, chunks: list[str], filename: str | None,
 
     # --- legacy pgvector fallback ---
     stored, last_err = 0, None
-    for c in chunks:
+    for i, c in enumerate(chunks):
         try:
             if shared:
-                db.insert_shared_memory(c, embeddings.embed(c), filename, user_id)
+                db.insert_shared_memory(c, vectors[i], filename, user_id)
             else:
                 db.insert_memory_scoped(
-                    user_id, c, embeddings.embed(c),
+                    user_id, c, vectors[i],
                     kind="document", source=filename, project_id=project_id,
                 )
             stored += 1
@@ -103,6 +107,16 @@ async def upload(
         raise HTTPException(status.HTTP_400_BAD_REQUEST,
                             f"Memory insertion failed: {last_err or 'Unknown error'}")
 
+    # Figure gallery (§6.1): pull embedded images so the UI can show them under
+    # answers grounded in this document. Best-effort — never fails the upload.
+    gallery: list[dict] = []
+    try:
+        figs = extract.extract_figures(file.filename or "file", data)
+        if figs:
+            gallery = figures.save_figures(uuid.uuid4().hex, figs)
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] figure gallery skipped: {e}")
+
     # Auto-routing mapping based on extension
     ext = ("." + (file.filename or "").rsplit(".", 1)[-1].lower()) if "." in (file.filename or "") else ""
     suggested = "long_context"  # default for docs
@@ -119,4 +133,5 @@ async def upload(
         "shared": shared,
         "truncated": len(chunks) >= MAX_CHUNKS,
         "suggested_category": suggested,
+        "figures": gallery,
     }

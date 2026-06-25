@@ -6,7 +6,7 @@ import { Logo } from "@/components/Logo";
 import { Markdown } from "@/components/Markdown";
 import { Citations } from "@/components/Citations";
 import { Button } from "@/components/ui/primitives";
-import { api, streamChat, uploadFile, clearToken, getToken } from "@/lib/api";
+import { api, streamChat, uploadFile, clearToken, getToken, assetUrl } from "@/lib/api";
 import CommandPalette from "@/components/CommandPalette";
 import SlashMenu from "@/components/SlashMenu";
 import ArtifactPane, { extractArtifact, type Artifact } from "@/components/ArtifactPane";
@@ -20,6 +20,8 @@ import {
   Search, Square, RefreshCw, Paperclip, Globe, Settings, Share2, ThumbsUp, ThumbsDown,
   Image as ImageIcon, Wand2, PanelRight, Shield, Brain, Copy, Check, ArrowDown,
   Mic, Volume2, VolumeX, Pin, Download, Printer, Keyboard, Star, Loader2, FileText,
+  UploadCloud, CheckCircle2, AlertCircle, FileSpreadsheet, FileImage, Presentation, Lock,
+  ChevronUp, ChevronDown, SlidersHorizontal,
 } from "lucide-react";
 
 type Msg = { id?: string; role: "user" | "assistant"; content: string; model?: string; citations?: any[]; feedback?: number; reasoning?: string; ts?: number };
@@ -57,6 +59,9 @@ export default function ChatPage() {
   const [persona, setPersona] = useState("kgpt");
   const [category, setCategory] = useState("");
   const [webSearch, setWebSearch] = useState(false);
+  const [strictMode, setStrictMode] = useState(false);
+  const [strictNoteOpen, setStrictNoteOpen] = useState(true);
+  const [toolbarOpen, setToolbarOpen] = useState(true);
   const [streaming, setStreaming] = useState(false);
   const [sidebar, setSidebar] = useState(true);
   const [me, setMe] = useState<any>(null);
@@ -70,7 +75,9 @@ export default function ChatPage() {
   const [copiedI, setCopiedI] = useState<number | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [images, setImages] = useState<string[]>([]);
-  const [attachment, setAttachment] = useState<{ name: string; status: "uploading" | "ready" | "error"; chunks?: number; msg?: string; shared?: boolean } | null>(null);
+  const [attachment, setAttachment] = useState<{ name: string; status: "uploading" | "ready" | "error"; chunks?: number; msg?: string; shared?: boolean; size?: number; figures?: { url: string; page?: number | null }[] } | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const dragDepth = useRef(0);
   const [shareUpload, setShareUpload] = useState(false);
   const [artifact, setArtifact] = useState<Artifact | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
@@ -93,7 +100,15 @@ export default function ChatPage() {
 
   useEffect(() => {
     if (!getToken()) { router.push("/login"); return; }
-    api.me().then(setMe).catch(() => router.push("/login"));
+    api.me().then((u: any) => {
+      // Mandatory profile: students must finish onboarding before chatting.
+      if (u && u.role !== "admin" && u.profile_complete === false) {
+        router.replace("/onboarding"); return;
+      }
+      setMe(u);
+      // Honour the "Web search by default" preference (Settings → Study & integrity).
+      if (u && u.web_search_enabled) setWebSearch(true);
+    }).catch(() => router.push("/login"));
     api.sessions().then(setSessions).catch(() => {});
     api.listModels().then((r: any) => { setCanPick(r.can_pick); setModels(r.models || []); }).catch(() => {});
     api.usage().then(setUsage).catch(() => {});
@@ -101,6 +116,19 @@ export default function ChatPage() {
   }, [router]);
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
+
+  // On phones the sidebar is an overlay drawer, so start it closed.
+  useEffect(() => {
+    if (typeof window !== "undefined" && window.matchMedia("(max-width: 1023px)").matches) {
+      setSidebar(false);
+    }
+  }, []);
+  // Close the drawer after an action on mobile so it doesn't cover the chat.
+  const closeSidebarMobile = () => {
+    if (typeof window !== "undefined" && window.matchMedia("(max-width: 1023px)").matches) {
+      setSidebar(false);
+    }
+  };
   useEffect(() => { if (activeId) setPinnedMsgs(pins.msgs(activeId)); }, [activeId]);
 
   // Estimate today's-limit usage (debounced).
@@ -148,7 +176,7 @@ export default function ChatPage() {
     let sid = sessionId;
     try {
       await streamChat(
-        { message: text, session_id: sessionId, persona, use_memory: true, web_search: webSearch, category: category || undefined, model: model || undefined, images: imgs.length ? imgs : undefined },
+        { message: text, session_id: sessionId, persona, use_memory: true, web_search: webSearch, strict: strictMode, category: category || undefined, model: model || undefined, images: imgs.length ? imgs : undefined },
         (delta) => setMessages((m) => m.map((msg, i) => i === m.length - 1 ? { ...msg, content: msg.content + delta } : msg)),
         (meta) => {
           if (meta.event === "session") sid = meta.session_id;
@@ -189,12 +217,14 @@ export default function ChatPage() {
     await runStream(text, activeId, imgs);
   }
 
-  async function onImage(e: React.ChangeEvent<HTMLInputElement>) {
-    const f = e.target.files?.[0];
-    if (!f) return;
+  function addImageFile(f: File) {
     const reader = new FileReader();
     reader.onload = () => setImages((im) => [...im, reader.result as string].slice(0, 4));
     reader.readAsDataURL(f);
+  }
+
+  async function onImage(e: React.ChangeEvent<HTMLInputElement>) {
+    if (e.target.files?.[0]) addImageFile(e.target.files[0]);
     if (imageRef.current) imageRef.current.value = "";
   }
 
@@ -213,23 +243,79 @@ export default function ChatPage() {
     await runStream(lastUser.content, activeId);
   }
 
-  async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
-    const f = e.target.files?.[0];
-    if (!f) return;
+  // --- Attachments: one route for the click button, drag-drop and paste -------
+  const MAX_FILE_MB = 50;
+  const DOC_EXTS = ["pdf", "docx", "pptx", "xlsx", "xls", "csv", "txt", "md"];
+  const IMG_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff"];
+  function extOf(name: string) { return name.includes(".") ? name.split(".").pop()!.toLowerCase() : ""; }
+
+  async function uploadDoc(f: File) {
+    const ext = extOf(f.name);
     const asShared = shareUpload && me?.role === "admin";
-    setAttachment({ name: f.name, status: "uploading", shared: asShared });
+    if (f.size > MAX_FILE_MB * 1024 * 1024) {
+      setAttachment({ name: f.name, size: f.size, status: "error", shared: asShared,
+        msg: `Too large — max ${MAX_FILE_MB} MB.` });
+      return;
+    }
+    if (!DOC_EXTS.includes(ext) && !IMG_EXTS.includes(ext)) {
+      setAttachment({ name: f.name, size: f.size, status: "error", shared: asShared,
+        msg: `Unsupported type ".${ext || "?"}". Use PDF, DOCX, PPTX, XLSX, CSV, TXT, MD or an image.` });
+      return;
+    }
+    setAttachment({ name: f.name, size: f.size, status: "uploading", shared: asShared });
     try {
       const r = await uploadFile(f, undefined, asShared);
-      setAttachment({ name: f.name, status: "ready", chunks: r.chunks_stored, shared: asShared });
-      if (r.suggested_category) {
-        setCategory(r.suggested_category);
-        setModel(""); // Clear any specifically chosen model to allow auto-routing
-      }
+      setAttachment({ name: f.name, size: f.size, status: "ready", chunks: r.chunks_stored, shared: asShared, figures: r.figures });
+      if (r.suggested_category) { setCategory(r.suggested_category); setModel(""); }
     } catch (err: any) {
-      setAttachment({ name: f.name, status: "error", msg: err.message, shared: asShared });
-    } finally {
-      if (fileRef.current) fileRef.current.value = "";
+      setAttachment({ name: f.name, size: f.size, status: "error", msg: err.message, shared: asShared });
     }
+  }
+
+  // Images (for vision) go to the image strip; everything else is a RAG upload.
+  // When an admin has Shared-KB on, even images are uploaded (OCR'd into the KB).
+  function routeFiles(files: FileList | File[]) {
+    const arr = Array.from(files);
+    if (!arr.length) return;
+    const adminShared = shareUpload && me?.role === "admin";
+    let docTaken = false;
+    for (const f of arr) {
+      const isImg = f.type.startsWith("image/") || IMG_EXTS.includes(extOf(f.name));
+      if (isImg && !adminShared) {
+        addImageFile(f);
+      } else if (!docTaken) {
+        uploadDoc(f);          // one document at a time
+        docTaken = true;
+      }
+    }
+  }
+
+  async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
+    if (e.target.files) routeFiles(e.target.files);
+    if (fileRef.current) fileRef.current.value = "";
+  }
+
+  function onDragEnter(e: React.DragEvent) {
+    if (!e.dataTransfer?.types?.includes("Files")) return;
+    e.preventDefault();
+    dragDepth.current += 1;
+    setDragging(true);
+  }
+  function onDragOver(e: React.DragEvent) { if (e.dataTransfer?.types?.includes("Files")) e.preventDefault(); }
+  function onDragLeave(e: React.DragEvent) {
+    if (!e.dataTransfer?.types?.includes("Files")) return;
+    dragDepth.current -= 1;
+    if (dragDepth.current <= 0) { dragDepth.current = 0; setDragging(false); }
+  }
+  function onDrop(e: React.DragEvent) {
+    e.preventDefault();
+    dragDepth.current = 0;
+    setDragging(false);
+    if (e.dataTransfer?.files?.length) routeFiles(e.dataTransfer.files);
+  }
+  function onPasteFiles(e: React.ClipboardEvent) {
+    const files = e.clipboardData?.files;
+    if (files && files.length) { e.preventDefault(); routeFiles(files); }
   }
 
   async function share() {
@@ -341,15 +427,24 @@ export default function ChatPage() {
 
       <AnimatePresence>
         {sidebar && (
+          /* Tap-to-close backdrop — mobile only (sidebar is in-flow on desktop). */
+          <motion.div
+            key="sidebar-backdrop"
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            onClick={() => setSidebar(false)}
+            className="fixed inset-0 z-30 bg-black/50 backdrop-blur-sm lg:hidden" />
+        )}
+        {sidebar && (
           <motion.aside
+            key="sidebar"
             initial={{ x: -288 }} animate={{ x: 0 }} exit={{ x: -288 }}
             transition={{ type: "spring", stiffness: 300, damping: 30 }}
-            className="glass z-20 flex w-72 flex-col border-r p-3">
+            className="glass fixed inset-y-0 left-0 z-40 flex w-72 max-w-[85vw] flex-col border-r p-3 lg:static lg:z-20 lg:max-w-none">
             <div className="flex items-center justify-between px-1 py-2">
               <Logo size={26} />
               <button onClick={() => setSidebar(false)} className="text-muted hover:text-fg"><X size={18} /></button>
             </div>
-            <Button onClick={newChat} className="btn-shine mt-2 w-full justify-start"><Plus size={16} /> New chat</Button>
+            <Button onClick={() => { newChat(); closeSidebarMobile(); }} className="btn-shine mt-2 w-full justify-start"><Plus size={16} /> New chat</Button>
             <button onClick={() => setSearchOpen(true)}
               className="mt-2 flex w-full items-center gap-2 rounded-lg border border-border bg-surface-2/50 px-3 py-2 text-sm text-muted transition-colors hover:text-fg">
               <Search size={14} /> Search chats <kbd className="ml-auto rounded bg-surface px-1.5 py-0.5 text-[10px]">⌘F</kbd>
@@ -359,11 +454,11 @@ export default function ChatPage() {
               {pinnedList.length > 0 && (
                 <>
                   <p className="px-3 pb-1 pt-1 text-[10px] font-semibold uppercase tracking-wide text-muted/70">Pinned</p>
-                  {pinnedList.map((s) => <ChatRow key={s.id} s={s} active={activeId === s.id} pinned onOpen={openSession} onPin={togglePinChat} onDelete={removeSession} />)}
+                  {pinnedList.map((s) => <ChatRow key={s.id} s={s} active={activeId === s.id} pinned onOpen={(id) => { openSession(id); closeSidebarMobile(); }} onPin={togglePinChat} onDelete={removeSession} />)}
                   <p className="px-3 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-wide text-muted/70">Recent</p>
                 </>
               )}
-              {otherList.map((s) => <ChatRow key={s.id} s={s} active={activeId === s.id} pinned={false} onOpen={openSession} onPin={togglePinChat} onDelete={removeSession} />)}
+              {otherList.map((s) => <ChatRow key={s.id} s={s} active={activeId === s.id} pinned={false} onOpen={(id) => { openSession(id); closeSidebarMobile(); }} onPin={togglePinChat} onDelete={removeSession} />)}
               {sessions.length === 0 && <p className="px-3 py-4 text-sm text-muted">No chats yet.</p>}
             </div>
 
@@ -383,20 +478,37 @@ export default function ChatPage() {
         )}
       </AnimatePresence>
 
-      <main className="relative flex flex-1 flex-col">
-        <header className="flex items-center justify-between border-b px-4 py-3">
-          <div className="flex items-center gap-3">
-            {!sidebar && <button onClick={() => setSidebar(true)} className="text-muted hover:text-fg"><Menu size={20} /></button>}
+      <main className="relative flex flex-1 flex-col"
+        onDragEnter={onDragEnter} onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop}>
+        <AnimatePresence>
+          {dragging && (
+            <motion.div
+              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+              className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center bg-bg/70 p-6 backdrop-blur-sm">
+              <div className="flex flex-col items-center gap-3 rounded-3xl border-2 border-dashed border-brand/60 bg-surface/85 px-8 py-7 text-center shadow-glow sm:px-12 sm:py-9">
+                <motion.div animate={{ y: [0, -6, 0] }} transition={{ repeat: Infinity, duration: 1.4 }}
+                  className="flex h-14 w-14 items-center justify-center rounded-2xl bg-brand/15 text-brand">
+                  <UploadCloud size={28} />
+                </motion.div>
+                <p className="text-lg font-semibold">Drop to attach</p>
+                <p className="max-w-xs text-sm text-muted">PDF, DOCX, PPTX, XLSX, CSV, TXT, MD — or an image to read</p>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+        <header className="flex items-center justify-between gap-2 border-b px-3 py-3 sm:px-4">
+          <div className="flex min-w-0 items-center gap-2 sm:gap-3">
+            {!sidebar && <button onClick={() => setSidebar(true)} className="shrink-0 text-muted hover:text-fg"><Menu size={20} /></button>}
             <div className="flex gap-1 overflow-x-auto">
               {PERSONAS.map((p) => (
                 <button key={p.id} onClick={() => setPersona(p.id)}
-                  className={`flex items-center gap-1.5 whitespace-nowrap rounded-lg px-3 py-1.5 text-sm font-medium transition-all ${persona === p.id ? "bg-gradient-to-br from-brand to-brand-2 text-brand-fg shadow-glow" : "text-muted hover:bg-surface-2"}`}>
+                  className={`flex items-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 py-1.5 text-sm font-medium transition-all sm:px-3 ${persona === p.id ? "bg-gradient-to-br from-brand to-brand-2 text-brand-fg shadow-glow" : "text-muted hover:bg-surface-2"}`}>
                   <p.icon size={14} /> {p.name}
                 </button>
               ))}
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex shrink-0 items-center gap-2">
             {me?.exam_mode && <span className="hidden rounded-full bg-amber-500/15 px-2.5 py-1 text-xs font-medium text-amber-400 sm:inline">Exam mode</span>}
             {messages.length > 0 && (
               <>
@@ -424,7 +536,7 @@ export default function ChatPage() {
             {messages.length === 0 ? (
               <div className="flex h-[60vh] flex-col items-center justify-center text-center">
                 <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-brand/20 to-accent/20 text-brand shadow-glow animate-glow-pulse"><Sparkles size={30} /></div>
-                <h2 className="text-3xl font-black tracking-tight">How can I help you, <span className="aurora-text">{me?.full_name?.split(" ")[0] || "there"}</span>?</h2>
+                <h2 className="text-2xl font-black tracking-tight sm:text-3xl">How can I help you, <span className="aurora-text">{me?.full_name?.split(" ")[0] || "there"}</span>?</h2>
                 <p className="mt-2 max-w-sm text-muted">Ask anything — write, code, analyze, plan, learn, or get exam-ready. K-GPT remembers what you share.</p>
                 <div className="mt-7 grid w-full max-w-xl grid-cols-1 gap-2.5 sm:grid-cols-2">
                   {SUGGESTIONS.map((s) => (
@@ -514,6 +626,16 @@ export default function ChatPage() {
         <div className="border-t p-4">
           {notice && <p className="mx-auto mb-2 max-w-3xl text-center text-xs text-brand">{notice}</p>}
           <div className="mx-auto max-w-3xl">
+            <div className="mb-1 flex justify-end">
+              <button onClick={() => setToolbarOpen((v) => !v)}
+                title={toolbarOpen ? "Hide the toolbar to free up space" : "Show the toolbar (model, Strict, Web, Attach…)"}
+                className="flex items-center gap-1 rounded-lg px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-surface-2">
+                <SlidersHorizontal size={12} />
+                {toolbarOpen ? "Hide options" : "Show options"}
+                {toolbarOpen ? <ChevronDown size={12} /> : <ChevronUp size={12} />}
+              </button>
+            </div>
+            {toolbarOpen && (
             <div className="mb-2 flex items-center gap-2 text-xs">
               <select value={category} onChange={(e) => setCategory(e.target.value)} disabled={!!model}
                 title={model ? "Clear the model pick to use smart routing" : "Routing mode"}
@@ -538,11 +660,17 @@ export default function ChatPage() {
                   ))}
                 </select>
               )}
-              <button onClick={() => setWebSearch((v) => !v)}
+              <button onClick={() => setStrictMode((v) => { const nv = !v; if (nv) { setWebSearch(false); setStrictNoteOpen(true); } return nv; })}
+                title="Strict mode: answer ONLY from documents in the knowledge base — never from the model's own knowledge or the web. If it's not in your documents, K-GPT says so."
+                className={`flex items-center gap-1 rounded-lg px-2 py-1 transition-colors ${strictMode ? "bg-amber-500/20 text-amber-400" : "text-muted hover:bg-surface-2"}`}>
+                <Lock size={13} /> {strictMode ? "Strict: ON" : "Strict"}
+              </button>
+              <button onClick={() => setWebSearch((v) => { const nv = !v; if (nv) setStrictMode(false); return nv; })}
                 className={`flex items-center gap-1 rounded-lg px-2 py-1 transition-colors ${webSearch ? "bg-brand/15 text-brand" : "text-muted hover:bg-surface-2"}`}>
                 <Globe size={13} /> Web
               </button>
-              <button onClick={() => fileRef.current?.click()} className="flex items-center gap-1 rounded-lg px-2 py-1 text-muted hover:bg-surface-2">
+              <button onClick={() => fileRef.current?.click()} title="Attach a file — or just drag &amp; drop or paste it here"
+                className="flex items-center gap-1 rounded-lg border border-brand/30 bg-brand/10 px-2.5 py-1 font-medium text-brand transition-colors hover:bg-brand/20">
                 <Paperclip size={13} /> Attach
               </button>
               {me?.role === "admin" && (
@@ -553,7 +681,7 @@ export default function ChatPage() {
                 </button>
               )}
               <input ref={fileRef} type="file" className="hidden" onChange={onFile}
-                accept=".pdf,.docx,.pptx,.xlsx,.csv,.txt,.md" />
+                accept=".pdf,.docx,.pptx,.xlsx,.xls,.csv,.txt,.md,.png,.jpg,.jpeg,.webp" />
               <button onClick={() => imageRef.current?.click()} title="Attach image (vision)" className="flex items-center gap-1 rounded-lg px-2 py-1 text-muted hover:bg-surface-2">
                 <ImageIcon size={13} /> Image
               </button>
@@ -581,6 +709,7 @@ export default function ChatPage() {
                 )}
               </div>
             </div>
+            )}
             {images.length > 0 && (
               <div className="mb-2 flex gap-2">
                 {images.map((src, i) => (
@@ -594,33 +723,67 @@ export default function ChatPage() {
             )}
             {attachment && (
               <div className="mb-2 flex flex-wrap gap-2">
-                <div className={`group flex items-center gap-2 rounded-xl border px-3 py-2 text-xs shadow-sm ${
-                  attachment.status === "error"
-                    ? "border-danger/40 bg-danger/10 text-danger"
-                    : "border-border bg-surface-2 text-fg"}`}>
-                  <span className={`flex h-7 w-7 items-center justify-center rounded-lg ${
-                    attachment.status === "error" ? "bg-danger/15 text-danger" : "bg-brand/15 text-brand"}`}>
-                    {attachment.status === "uploading"
-                      ? <Loader2 size={14} className="animate-spin" />
-                      : <FileText size={14} />}
-                  </span>
-                  <div className="flex flex-col leading-tight">
-                    <span className="max-w-[220px] truncate font-medium">{attachment.name}</span>
-                    <span className="text-[11px] text-muted">
-                      {attachment.status === "uploading"
-                        ? (attachment.shared ? "Uploading to shared knowledge base…" : "Uploading & indexing…")
-                        : attachment.status === "ready"
-                        ? (attachment.shared
-                            ? `Saved to shared KB · ${attachment.chunks} chunks · all users can ask`
-                            : `Ready · ${attachment.chunks} chunks · ask about it`)
-                        : (attachment.msg || "Upload failed")}
-                    </span>
+                <div className={`group relative flex w-full items-center gap-3 overflow-hidden rounded-xl border px-3 py-2.5 shadow-sm sm:w-auto sm:min-w-[300px] ${
+                  attachment.status === "error" ? "border-danger/40 bg-danger/10"
+                    : attachment.status === "ready" ? "border-emerald-500/30 bg-emerald-500/5"
+                    : "border-border bg-surface-2"}`}>
+                  <FileTypeBadge name={attachment.name} />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="truncate text-sm font-medium text-fg">{attachment.name}</span>
+                      {attachment.size != null && <span className="shrink-0 text-[11px] text-muted">{fmtBytes(attachment.size)}</span>}
+                    </div>
+                    <div className="mt-0.5 text-[11px]">
+                      {attachment.status === "uploading" && (
+                        <span className="text-muted">{attachment.shared ? "Uploading to shared knowledge base…" : "Uploading & indexing…"}</span>
+                      )}
+                      {attachment.status === "ready" && (
+                        <span className="inline-flex items-center gap-1 text-emerald-400">
+                          <CheckCircle2 size={12} />
+                          {attachment.shared ? `Saved to shared KB · ${attachment.chunks} chunks · all users can ask` : `Ready · ${attachment.chunks} chunks · ask about it`}
+                        </span>
+                      )}
+                      {attachment.status === "error" && (
+                        <span className="inline-flex items-center gap-1 text-danger"><AlertCircle size={12} /> {attachment.msg || "Upload failed"}</span>
+                      )}
+                    </div>
+                    {attachment.status === "uploading" && (
+                      <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-surface">
+                        <motion.div className="h-full w-1/3 rounded-full bg-gradient-to-r from-brand to-brand-2"
+                          animate={{ x: ["-120%", "330%"] }} transition={{ repeat: Infinity, duration: 1.1, ease: "easeInOut" }} />
+                      </div>
+                    )}
                   </div>
                   <button onClick={() => setAttachment(null)} title="Remove"
-                    className="ml-1 rounded-full p-1 text-muted hover:bg-surface hover:text-danger">
-                    <X size={13} />
+                    className="shrink-0 rounded-full p-1 text-muted hover:bg-surface hover:text-danger">
+                    <X size={14} />
                   </button>
                 </div>
+                {attachment.status === "ready" && attachment.figures && attachment.figures.length > 0 && (
+                  <div className="flex w-full flex-col gap-1">
+                    <span className="text-[11px] text-muted">{attachment.figures.length} figure{attachment.figures.length > 1 ? "s" : ""} extracted from this document</span>
+                    <div className="flex flex-wrap gap-2">
+                      {attachment.figures.slice(0, 12).map((fig, i) => (
+                        <a key={i} href={assetUrl(fig.url)} target="_blank" rel="noopener noreferrer"
+                          title={fig.page ? `Page ${fig.page}` : `Figure ${i + 1}`}
+                          className="block h-16 w-16 overflow-hidden rounded-lg border border-border bg-surface-2">
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img src={assetUrl(fig.url)} alt={`Figure ${i + 1}`} className="h-full w-full object-cover" loading="lazy" />
+                        </a>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+            {strictMode && strictNoteOpen && (
+              <div className="mb-2 flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-[11px] text-amber-400">
+                <Lock size={12} className="mt-0.5 shrink-0" />
+                <span className="flex-1">Strict mode: answers come only from your knowledge-base documents — no external AI knowledge or web. If it's not in your documents, K-GPT will tell you.</span>
+                <button onClick={() => setStrictNoteOpen(false)} title="Hide this note (Strict mode stays on)"
+                  className="shrink-0 rounded p-0.5 text-amber-400/70 transition-colors hover:bg-amber-500/20 hover:text-amber-300">
+                  <X size={12} />
+                </button>
               </div>
             )}
             <div className="relative flex items-end gap-2">
@@ -633,6 +796,7 @@ export default function ChatPage() {
                   value={input} onChange={(e) => setInput(e.target.value)} rows={1}
                   onInput={(e) => { const t = e.currentTarget; t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 160) + "px"; }}
                   onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !input.startsWith("/")) { e.preventDefault(); (e.currentTarget as HTMLTextAreaElement).style.height = "auto"; send(); } }}
+                  onPaste={onPasteFiles}
                   placeholder={voice.listening ? "Listening…" : "Message K-GPT…  (/ for prompts, ⌘K for commands)"}
                   className={`max-h-40 w-full resize-none rounded-xl border bg-surface/60 px-4 py-3 pr-12 text-sm focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/30 ${voice.listening ? "border-brand/70" : "border-border"}`} />
                 {mounted && voice.supported && (
@@ -650,7 +814,7 @@ export default function ChatPage() {
             </div>
           </div>
           {usage && (me?.role !== "admin") && (
-            <div className="mx-auto mt-2 flex max-w-3xl items-center justify-center gap-2 text-[11px] text-muted">
+            <div className="mx-auto mt-2 flex max-w-3xl flex-wrap items-center justify-center gap-x-2 gap-y-1 text-[11px] text-muted">
               <span className="font-medium text-fg">Daily limit</span>
               <div className="h-1.5 w-32 overflow-hidden rounded-full bg-surface-2">
                 <div className={`h-full rounded-full transition-all ${usage.percent_used >= 95 ? "bg-danger" : usage.percent_used >= 75 ? "bg-warning" : "bg-gradient-to-r from-brand to-brand-2"}`}
@@ -683,6 +847,29 @@ export default function ChatPage() {
         </aside>
       )}
     </div>
+  );
+}
+
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/** Colored file-type badge (extension + icon) for the attachment chip. */
+function FileTypeBadge({ name }: { name: string }) {
+  const ext = (name.includes(".") ? name.split(".").pop()! : "").toLowerCase();
+  let Icon: any = FileText, cls = "bg-brand/15 text-brand", label = ext.slice(0, 4).toUpperCase() || "FILE";
+  if (ext === "pdf") { Icon = FileText; cls = "bg-red-500/15 text-red-400"; label = "PDF"; }
+  else if (["doc", "docx", "txt", "md", "rtf"].includes(ext)) { Icon = FileText; cls = "bg-blue-500/15 text-blue-400"; }
+  else if (["xls", "xlsx", "csv"].includes(ext)) { Icon = FileSpreadsheet; cls = "bg-emerald-500/15 text-emerald-400"; }
+  else if (["ppt", "pptx"].includes(ext)) { Icon = Presentation; cls = "bg-orange-500/15 text-orange-400"; }
+  else if (["png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff"].includes(ext)) { Icon = FileImage; cls = "bg-purple-500/15 text-purple-400"; label = "IMG"; }
+  return (
+    <span className={`flex h-9 w-9 shrink-0 flex-col items-center justify-center rounded-lg ${cls}`}>
+      <Icon size={15} />
+      <span className="mt-0.5 text-[7px] font-bold uppercase leading-none">{label}</span>
+    </span>
   );
 }
 

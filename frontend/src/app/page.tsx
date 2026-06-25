@@ -178,7 +178,15 @@ export default function Landing() {
         </section>
 
         <footer className="py-8 text-center text-sm text-muted">
-          Built by Vishnu Sharma · K-GPT for KSRMCE · {new Date().getFullYear()}
+          <div className="mb-3 flex flex-wrap items-center justify-center gap-x-4 gap-y-2">
+            <Link href="/about" className="hover:text-fg">About Us</Link>
+            <Link href="/contact" className="hover:text-fg">Contact Us</Link>
+            <Link href="/pricing" className="hover:text-fg">Pricing</Link>
+            <Link href="/privacy" className="hover:text-fg">Privacy Policy</Link>
+            <Link href="/terms" className="hover:text-fg">Terms &amp; Conditions</Link>
+            <Link href="/refund" className="hover:text-fg">Cancellation &amp; Refund</Link>
+          </div>
+          Prompt-Pulse · K-GPT for KSRMCE · {new Date().getFullYear()}
         </footer>
       </main>
     </>

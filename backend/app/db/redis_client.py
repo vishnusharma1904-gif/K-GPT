@@ -54,6 +54,39 @@ def available() -> bool:
         return False
 
 
+def configured() -> bool:
+    """Whether a Redis URL is set (used to decide if cross-process coordination
+    like the scheduler leader lock is even possible)."""
+    return bool(get_settings().redis_url)
+
+
+# === Distributed leader lock ===============================================
+
+def try_acquire_lock(name: str, ttl_seconds: int = 900) -> bool:
+    """Best-effort distributed lock via SET NX EX. Returns True only for the
+    single caller that wins the lock; False for everyone else (and when Redis is
+    unavailable, since coordination isn't possible). Holders should periodically
+    call ``refresh_lock`` so leadership survives but is reclaimable if they die."""
+    r = _pool()
+    if not r:
+        return False
+    try:
+        return bool(r.set(f"lock:{name}", "1", nx=True, ex=ttl_seconds))
+    except Exception:
+        return False
+
+
+def refresh_lock(name: str, ttl_seconds: int = 900) -> None:
+    """Extend a held leader lock's TTL. Fails silently."""
+    r = _pool()
+    if not r:
+        return
+    try:
+        r.expire(f"lock:{name}", ttl_seconds)
+    except Exception:
+        pass
+
+
 # === Caching ================================================================
 
 def _cache_key(prefix: str, text: str) -> str:

@@ -23,12 +23,16 @@ export default function AuthShell({
   subtitle,
   footer,
   showBack = true,
+  biome,
 }: {
   children: ReactNode;
   title: string;
   subtitle?: ReactNode;
   footer?: ReactNode;
   showBack?: boolean;
+  /** Optional themed-backdrop hint (e.g. "beaches", "forests"). Accepted so auth
+   *  pages can pass it; currently decorative. */
+  biome?: string;
 }) {
   return (
     <main className="relative min-h-screen overflow-hidden">

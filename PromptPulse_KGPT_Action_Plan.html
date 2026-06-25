@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Prompt-Pulse — K-GPT Action Plan</title>
+<style>
+  :root { --ink:#1a2233; --muted:#5b6472; --accent:#1f6f8b; --accent2:#13505b; --line:#d8dee6; --soft:#eef3f6; }
+  * { box-sizing: border-box; }
+  html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  body {
+    font-family: "Segoe UI", Calibri, Arial, sans-serif;
+    color: #1a2233; line-height: 1.5; margin: 0;
+    font-size: 11pt; background: #f3f5f7;
+  }
+  .page {
+    background: #fff; max-width: 800px; margin: 18px auto; padding: 46px 54px;
+    box-shadow: 0 2px 14px rgba(0,0,0,.08);
+  }
+  h1 { font-size: 22pt; margin: 0 0 2px; color: #13505b; letter-spacing:-.3px; }
+  h2 {
+    font-size: 13pt; color: #1f6f8b; margin: 22px 0 8px;
+    border-bottom: 2px solid #1f6f8b; padding-bottom: 4px;
+  }
+  .sub { color: #5b6472; font-size: 10pt; margin: 0; }
+  .brandbar { border-left: 5px solid #1f6f8b; padding-left: 14px; margin-bottom: 6px; }
+  .meta { font-size: 9.5pt; color: #5b6472; margin-top: 10px; border-top:1px solid #d8dee6; padding-top:8px;}
+  p { margin: 6px 0; }
+  ul { margin: 6px 0 6px 0; padding-left: 20px; }
+  li { margin: 3px 0; }
+  strong { color: #13505b; }
+  table { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 10pt; }
+  th, td { border: 1px solid #d8dee6; padding: 7px 10px; text-align: left; vertical-align: top; }
+  th { background: #1f6f8b; color: #fff; font-weight: 600; }
+  tr:nth-child(even) td { background: #f5f8fa; }
+  .pill { display:inline-block; background:#eef3f6; color:#13505b; border:1px solid #cfe0e7;
+          border-radius: 20px; padding: 2px 12px; font-size: 9.5pt; font-weight:600; }
+  .lead { font-size: 11.5pt; color:#2a3344; }
+  .callout { background:#eef3f6; border-left:4px solid #1f6f8b; padding:10px 14px; margin:10px 0; border-radius:4px; }
+  .price { font-size: 15pt; font-weight: 700; color:#13505b; }
+  .footer { text-align:center; color:#8a94a3; font-size:8.5pt; margin-top:26px; border-top:1px solid #d8dee6; padding-top:8px; }
+  @media print {
+    body { background:#fff; font-size: 10.5pt; }
+    .page { box-shadow:none; margin:0; max-width:none; padding: 26px 32px; }
+    h2 { page-break-after: avoid; }
+    table, .callout { page-break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="brandbar">
+    <span class="pill">PROMPT&#8209;PULSE</span>
+    <h1>K&#8209;GPT — Action Plan &amp; Briefing</h1>
+    <p class="sub">A campus&#8209;purpose AI assistant, built for KSRM College of Engineering</p>
+  </div>
+  <p class="meta">Prepared for: Head of Department &nbsp;|&nbsp; Prepared by: Prompt&#8209;Pulse &nbsp;|&nbsp; Product: K&#8209;GPT &nbsp;|&nbsp; June 2026</p>
+
+  <h2>Who We Are</h2>
+  <p class="lead">We are <strong>Prompt&#8209;Pulse</strong> — a student&#8209;founded technology venture building practical, affordable AI for Indian campuses. Our flagship product, <strong>K&#8209;GPT</strong>, is a purpose&#8209;built AI study assistant for KSRMCE: it takes the same class of frontier AI models that power ChatGPT and Gemini and wraps them in a layer designed for one institution — grounded in the college&rsquo;s own verified material, priced in rupees, integrity&#8209;protected, multilingual, and able to run on the college&rsquo;s own infrastructure.</p>
+
+  <h2>The Team</h2>
+  <table>
+    <tr><th style="width:34%">Member</th><th>Role</th></tr>
+    <tr><td><strong>Vishnu Sharma</strong></td><td>Chief Executive Officer (CEO) &mdash; also Lead Developer, K&#8209;GPT</td></tr>
+    <tr><td><strong>Shristi</strong></td><td>Chief Technology Officer (CTO) &mdash; also Lead Developer (QA &amp; Reliability), K&#8209;GPT</td></tr>
+    <tr><td><strong>Bandla Rahul</strong></td><td>Chief Financial Officer (CFO)</td></tr>
+    <tr><td><strong>Kinkiri Rajeev</strong></td><td>Full&#8209;Stack &amp; AI/ML Intern</td></tr>
+  </table>
+
+  <p><strong>K&#8209;GPT — lead developer contributions</strong></p>
+  <ul>
+    <li><strong>Vishnu Sharma:</strong> full&#8209;stack development (Next.js front&#8209;end and FastAPI back&#8209;end); model orchestration, selection and multi&#8209;provider integration; the retrieval (RAG) pipeline and knowledge&#8209;base engine; security architecture (prompt&#8209;injection defence, email&#8209;OTP authentication, safety monitoring); persona development; system pipeline and workflow design; the multilingual engine; Strict / exam&#8209;integrity modes; OCR and document handling; and infrastructure, deployment and hosting.</li>
+    <li><strong>Shristi:</strong> complete testing and quality assurance; error detection, debugging and defect resolution; reliability and quality improvement across releases; and ownership of remaining QA&#8209;related engineering work.</li>
+  </ul>
+
+  <h2>What We Do</h2>
+  <p>We deliver a single, account&#8209;based AI platform that serves an entire campus. One deployment gives every student a private assistant — with their own chat history, personal notes memory, fair&#8209;use quota, and a low&#8209;cost subscription — while the institution keeps central control over content, spending, safety, and data.</p>
+
+  <h2>The Problem We Solve</h2>
+  <ul>
+    <li><strong>Cost.</strong> ChatGPT Edu and Gemini for Education are sold per&#8209;seat, per&#8209;year, in US dollars — a large, fixed bill whether or not students use them. Individual ChatGPT Plus is ~&#8377;1,950/month, out of reach for most students.</li>
+    <li><strong>Trust &amp; relevance.</strong> Generic chatbots answer from the open internet and can &ldquo;sound plausible&rdquo; while being wrong; they have no notion of the college&rsquo;s own syllabi, lab manuals, or question banks.</li>
+    <li><strong>Language.</strong> Mainstream tools are English&#8209;first; many students think and learn in Telugu, Hindi and other Indian languages.</li>
+    <li><strong>Academic integrity.</strong> Faculty rightly worry that open AI simply does graded work for students.</li>
+    <li><strong>Data control.</strong> Student conversations and institutional documents sit on foreign vendor clouds.</li>
+  </ul>
+
+  <h2>How We Do It</h2>
+  <ul>
+    <li><strong>Verified knowledge base (RAG).</strong> Admins upload official college material; every answer is grounded in it first and cited inline as <em>[VERIFIED &middot; filename]</em>. A <strong>Strict mode</strong> restricts answers to those documents only — for exam&#8209;accurate, source&#8209;true responses.</li>
+    <li><strong>Cheapest&#8209;capable&#8209;first routing.</strong> Each query is routed across multiple providers (via our ZenMux + LiteLLM gateway) to the lowest&#8209;cost capable model, with automatic failover — frontier intelligence without vendor lock&#8209;in.</li>
+    <li><strong>Zero&#8209;cost repeats.</strong> A semantic answer cache and learned&#8209;answer reuse serve common questions with no additional model spend.</li>
+    <li><strong>Multilingual.</strong> Understands and replies in English plus 22 Indian languages, mirroring the student&rsquo;s language automatically.</li>
+    <li><strong>Document intelligence.</strong> OCR converts scanned and <strong>handwritten</strong> notes into searchable text; figures are extracted into a gallery; maths renders as LaTeX; the model can draw charts; whole chats export to PDF.</li>
+    <li><strong>Integrity &amp; safety.</strong> An exam&#8209;integrity mode coaches instead of submitting graded work; input is screened, prompt&#8209;injection is blocked, and flagged events are logged for admin review.</li>
+    <li><strong>Controls &amp; access.</strong> Sign&#8209;in is gated to the college domain with mandatory email&#8209;OTP verification; per&#8209;student and per&#8209;cohort quotas cap spend; an admin dashboard manages students and usage.</li>
+    <li><strong>Your data, your servers.</strong> The platform can run fully self&#8209;hosted (PostgreSQL, Redis, Qdrant, etc.), giving the college true data residency. <em>On the roadmap:</em> a natural voice mode optimised for Indian languages.</li>
+  </ul>
+
+  <h2>Unique Selling Point &amp; MOAT</h2>
+  <p class="callout"><strong>USP:</strong> The same frontier&#8209;model brain as ChatGPT and Gemini, <strong>made ours</strong> — grounded in KSRMCE&rsquo;s verified documents with citations, in the student&rsquo;s own language, integrity&#8209;safe, and priced at &#8377;99/month.</p>
+  <p><strong>Our defensible MOAT</strong> (what protects us as we grow):</p>
+  <ul>
+    <li><strong>Compounding institutional data.</strong> The more the college uploads and the more students use it, the richer and more college&#8209;specific the verified knowledge base and answer memory become — a corpus and trust a newcomer cannot copy.</li>
+    <li><strong>Cost &amp; unit&#8209;economics engineering.</strong> Multi&#8209;provider routing, caching and quotas let us sustainably offer frontier&#8209;model help at &#8377;99 — a price per&#8209;seat USD incumbents cannot match without cannibalising their model.</li>
+    <li><strong>Institutional embedding &amp; switching cost.</strong> As the sanctioned campus tool — domain sign&#8209;in, admin controls, the college&rsquo;s documents and each student&rsquo;s history, optional on&#8209;premise data — replacing us becomes costly and disruptive.</li>
+    <li><strong>India&#8209;first vernacular edge.</strong> Deep Indian&#8209;language support, rupee pricing, local payments and a forthcoming Indian&#8209;language voice mode — territory global products do not optimise for.</li>
+    <li><strong>Vendor&#8209;agnostic architecture.</strong> We are tied to no single model provider, so our cost, resilience and margins hold as the AI market shifts.</li>
+  </ul>
+
+  <h2>Pricing <span class="pill">Introductory</span></h2>
+  <table>
+    <tr><th style="width:34%">Plan</th><th>Price (incl. GST &amp; all taxes)</th><th>Effective</th></tr>
+    <tr><td><strong>Monthly</strong></td><td class="price">&#8377;99 / month</td><td>Pay&#8209;as&#8209;you&#8209;go flexibility</td></tr>
+    <tr><td><strong>Per Semester</strong></td><td class="price">&#8377;349 / semester</td><td>&asymp; &#8377;58/month &mdash; best value</td></tr>
+  </table>
+  <p class="sub">For context, individual ChatGPT Plus is roughly &#8377;1,950/month. K&#8209;GPT delivers comparable frontier&#8209;model help for a small fraction, with college&#8209;grounded answers the consumer tools cannot give.</p>
+
+  <h2>Benefits to Students</h2>
+  <ul>
+    <li><strong>Genuinely affordable</strong> — &#8377;99/month or &#8377;349/semester, taxes included; less than a single outing.</li>
+    <li><strong>Trustworthy, syllabus&#8209;grounded answers</strong> with citations to the college&rsquo;s own material; Strict mode for exam&#8209;accurate responses.</li>
+    <li><strong>Learns in their language</strong> — Telugu, Hindi, English and 19 more, automatically.</li>
+    <li><strong>Notes that work</strong> — handwritten and scanned notes become searchable and answerable.</li>
+    <li><strong>A 24/7 tutor</strong> that explains concepts and works through problems step by step — without doing graded assignments for them.</li>
+    <li><strong>Built for studying</strong> — LaTeX maths, charts, extracted figures, private chat history and personal notes memory, and one&#8209;click export of a whole chat to PDF.</li>
+    <li><strong>Coming soon</strong> — hands&#8209;free voice mode in the student&rsquo;s own language.</li>
+  </ul>
+
+  <div class="footer">
+    Prompt&#8209;Pulse &middot; K&#8209;GPT &mdash; Campus AI for KSRMCE &middot; Confidential briefing prepared for departmental review, June 2026
+  </div>
+
+</div>
+</body>
+</html>

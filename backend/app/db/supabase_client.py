@@ -259,6 +259,16 @@ def consume_auth_token(token_id: str) -> None:
     sb().table("auth_tokens").update({"used": True}).eq("id", token_id).execute()
 
 
+def get_auth_token_for_user(user_id: str, token_hash: str, kind: str) -> dict[str, Any] | None:
+    """Like get_auth_token but scoped to a specific user. Needed for short OTP
+    codes, where two users could coincidentally pick the same code (same hash);
+    scoping by user_id prevents one user's code from matching another's row."""
+    r = (sb().table("auth_tokens").select("*")
+         .eq("user_id", user_id).eq("token_hash", token_hash).eq("kind", kind)
+         .eq("used", False).limit(1).execute())
+    return r.data[0] if r.data else None
+
+
 # --- Projects (P20 / P30) ---------------------------------------------------
 def create_project(user_id: str, name: str, instructions: str | None = None,
                    color: str = "brand") -> dict[str, Any]:

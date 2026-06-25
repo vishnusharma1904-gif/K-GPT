@@ -52,29 +52,74 @@ export function downloadText(filename: string, text: string, type = "text/markdo
   URL.revokeObjectURL(url);
 }
 
-/* Print just the conversation (browser "Save as PDF"). */
+/* Print/Save-as-PDF a conversation with FULL fidelity — markdown, LaTeX math,
+   tables, code, images and ```chart blocks are all rendered (backlog §6.2).
+   Markdown→HTML (marked), math (KaTeX auto-render) and code styling are pulled
+   from CDN inside the print window only; if the CDN can't be reached the raw
+   markdown still prints legibly, so it degrades gracefully offline. */
 export function printConversation(title: string, messages: Msg[]) {
   const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  const body = messages
+  const payload = messages
     .filter((m) => m.content?.trim())
-    .map((m) => `<div class="m ${m.role}"><div class="who">${m.role === "user" ? "You" : "K-GPT"}</div><div class="c">${esc(m.content)}</div></div>`)
-    .join("");
+    .map((m) => ({ role: m.role, who: m.role === "user" ? "You" : `K-GPT${m.model ? ` · ${m.model.split("/").pop()}` : ""}`, content: m.content }));
+
   const html = `<!doctype html><html><head><meta charset="utf-8"><title>${esc(title || "K-GPT")}</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.10.0/build/styles/github.min.css">
   <style>
-    body{font:14px/1.6 -apple-system,Segoe UI,Roboto,sans-serif;max-width:760px;margin:40px auto;padding:0 24px;color:#111}
+    body{font:14px/1.65 -apple-system,Segoe UI,Roboto,sans-serif;max-width:760px;margin:40px auto;padding:0 24px;color:#111}
     h1{font-size:22px;margin:0 0 4px} .sub{color:#666;font-size:12px;margin-bottom:24px}
-    .m{margin:0 0 18px;padding:14px 16px;border-radius:12px;white-space:pre-wrap}
+    .m{margin:0 0 18px;padding:14px 16px;border-radius:12px}
     .m.user{background:#eef1ff;border:1px solid #dfe4ff}
     .m.assistant{background:#f7f7f9;border:1px solid #ececf0}
     .who{font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#555;margin-bottom:6px}
-    @media print{ .m{break-inside:avoid} }
+    .c :first-child{margin-top:0} .c :last-child{margin-bottom:0}
+    .c pre{background:#0d1117;color:#e6edf3;padding:12px;border-radius:8px;overflow:auto;font-size:12px}
+    .c code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+    .c table{border-collapse:collapse;width:100%;font-size:13px;margin:8px 0}
+    .c th,.c td{border:1px solid #d0d4dd;padding:6px 10px;text-align:left}
+    .c th{background:#eef1f6} .c img{max-width:100%;border-radius:8px}
+    .chart-table caption{font-weight:600;text-align:left;margin-bottom:4px}
+    @media print{ .m{break-inside:avoid} a{color:#111;text-decoration:none} }
   </style></head><body>
   <h1>${esc(title || "K-GPT conversation")}</h1>
   <div class="sub">Exported ${new Date().toLocaleString()} · KSRMCE Campus AI</div>
-  ${body}
-  </body></html>`;
+  <div id="root"></div>
+  <script id="data" type="application/json">${JSON.stringify(payload).replace(/</g, "\\u003c")}</script>
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+  <script>
+    var msgs = JSON.parse(document.getElementById('data').textContent);
+    var root = document.getElementById('root');
+    function chartToTable(spec){
+      try{ var s=JSON.parse(spec);
+        var x=s.x||s.labels||[]; var series=s.series||(s.data?[{name:s.name||'',data:s.data}]:[]);
+        var h='<table class="chart-table">'+(s.title?'<caption>'+s.title+'</caption>':'');
+        h+='<tr><th></th>'+x.map(function(l){return '<th>'+l+'</th>';}).join('')+'</tr>';
+        h+=series.map(function(se){return '<tr><th>'+(se.name||'')+'</th>'+(se.data||[]).map(function(v){return '<td>'+v+'</td>';}).join('')+'</tr>';}).join('');
+        return h+'</table>';
+      }catch(e){ return '<pre>'+spec+'</pre>'; }
+    }
+    msgs.forEach(function(m){
+      var div=document.createElement('div'); div.className='m '+m.role;
+      var c='<div class="who">'+m.who+'</div><div class="c"></div>';
+      div.innerHTML=c;
+      var body=div.querySelector('.c');
+      try{ body.innerHTML = window.marked ? marked.parse(m.content) : m.content; }
+      catch(e){ body.textContent = m.content; }
+      // chart code blocks -> data tables
+      body.querySelectorAll('code.language-chart, code.lang-chart').forEach(function(code){
+        var wrap=document.createElement('div'); wrap.innerHTML=chartToTable(code.textContent);
+        var pre=code.closest('pre')||code; pre.replaceWith(wrap.firstChild);
+      });
+      root.appendChild(div);
+    });
+    try{ if(window.renderMathInElement) renderMathInElement(root,{delimiters:[
+      {left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false},
+      {left:'\\\\[',right:'\\\\]',display:true},{left:'\\\\(',right:'\\\\)',display:false}]}); }catch(e){}
+    setTimeout(function(){ window.focus(); window.print(); }, 600);
+  </script></body></html>`;
   const w = window.open("", "_blank");
   if (!w) return;
   w.document.open(); w.document.write(html); w.document.close();
-  setTimeout(() => { w.focus(); w.print(); }, 350);
 }

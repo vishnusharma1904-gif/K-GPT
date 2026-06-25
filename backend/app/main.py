@@ -10,9 +10,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import get_settings
 from app.core.observability import (RequestContextMiddleware, init_sentry,
                                     setup_logging)
-from app.routers import (account, admin, auth, billing, chat, feedback, health,
-                         memory, oauth, projects, prompts, share, status, study,
-                         tools, upload, voice)
+from app.routers import (account, admin, auth, billing, chat, feedback, figures,
+                         health, memory, oauth, projects, prompts, share, status,
+                         study, tools, upload, voice)
 from app.db import postgres_client, qdrant_client, queue_client
 from prometheus_fastapi_instrumentator import Instrumentator
 
@@ -32,6 +32,7 @@ for _name, _val in {
     "DEEPSEEK_API_KEY": settings.deepseek_api_key,
     "COHERE_API_KEY": settings.cohere_api_key,
     "NVIDIA_NIM_API_KEY": settings.nvidia_nim_api_key,
+    "ZENMUX_API_KEY": settings.zenmux_api_key,
     "TAVILY_API_KEY": settings.tavily_api_key,
 }.items():
     if _val:
@@ -64,11 +65,30 @@ async def lifespan(app: FastAPI):
         print(f"[warn] rabbitmq init skipped: {e}")
 
     # Nightly quota reset + auto-tiering + subscription expiry (Epic B/C).
+    #
+    # This must fire on exactly ONE process. Under `uvicorn --workers N` every
+    # worker runs this lifespan, so we elect a single leader:
+    #   * Redis configured  -> a distributed lock (SET NX) picks one winner and
+    #     the leader refreshes it every few minutes so it can be reclaimed if the
+    #     process dies. No double-fire even across many workers/replicas.
+    #   * No Redis          -> fall back to the `scheduler_enabled` flag; operators
+    #     running multiple workers set it false on all but one.
+    from app.db import redis_client
+    _LEADER_LOCK = "scheduler:leader"
+    _LOCK_TTL = 900  # 15 min; refreshed every 5
     scheduler = None
-    if settings.supabase_url and settings.supabase_service_key:
+    is_leader = False
+    if settings.scheduler_enabled:
+        if redis_client.configured():
+            is_leader = redis_client.try_acquire_lock(_LEADER_LOCK, _LOCK_TTL)
+        else:
+            is_leader = True  # single-instance fallback (see scheduler_enabled)
+
+    if is_leader and settings.supabase_url and settings.supabase_service_key:
         try:
             from apscheduler.schedulers.asyncio import AsyncIOScheduler
             from apscheduler.triggers.cron import CronTrigger
+            from apscheduler.triggers.interval import IntervalTrigger
             from app.services import entitlements, memory_compressor
 
             async def _nightly():
@@ -88,10 +108,19 @@ async def lifespan(app: FastAPI):
 
             scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
             scheduler.add_job(_nightly, CronTrigger(hour=0, minute=5))  # 00:05 IST
+            if redis_client.configured():
+                # Keep leadership alive; if this process dies the lock expires and
+                # another worker can take over on its next restart.
+                scheduler.add_job(
+                    lambda: redis_client.refresh_lock(_LEADER_LOCK, _LOCK_TTL),
+                    IntervalTrigger(seconds=_LOCK_TTL // 3),
+                )
             scheduler.start()
-            print("[ok] nightly entitlements sweep scheduled (00:05 IST)")
+            print("[ok] nightly entitlements sweep scheduled (00:05 IST) — this is the scheduler leader")
         except Exception as e:  # noqa: BLE001
             print(f"[warn] scheduler not started: {e}")
+    elif settings.scheduler_enabled and settings.supabase_url and settings.supabase_service_key:
+        print("[ok] scheduler leadership held by another worker; not scheduling here")
 
     yield
 
@@ -138,7 +167,7 @@ async def security_headers(request, call_next):
 
 for r in (auth.router, oauth.router, chat.router, memory.router, account.router,
           billing.router, admin.router, health.router,
-          projects.router, share.router, upload.router,
+          projects.router, share.router, upload.router, figures.router,
           prompts.router, study.router, tools.router, status.router,
           feedback.router, voice.router):
     app.include_router(r)

@@ -1,0 +1,17 @@
+# Single public origin for K-GPT.
+#   /api/*  -> FastAPI backend (path preserved; flush_interval -1 keeps SSE live)
+#   /       -> Next.js frontend
+# Serving both under ONE origin means: no CORS config needed, and streaming
+# (Server-Sent Events) works — the two things that were painful over ngrok.
+:8080 {
+	@api path /api/* /docs /openapi.json /metrics
+	handle @api {
+		reverse_proxy backend:8400 {
+			flush_interval -1
+		}
+	}
+
+	handle {
+		reverse_proxy frontend:3000
+	}
+}

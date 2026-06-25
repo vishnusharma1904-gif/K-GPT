@@ -93,11 +93,10 @@ services:
       - "127.0.0.1:6334:6334"            # gRPC (faster for bulk operations)
     volumes:
       - qdrant_data:/qdrant/storage
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:6333/healthz || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+    # NOTE: the qdrant image ships no curl/bash, so an in-container HTTP/TCP
+    # healthcheck always reports "unhealthy" even when Qdrant is fine. Qdrant
+    # boots in ~1-2s and the backend's qdrant_client degrades gracefully, so we
+    # don't gate startup on a healthcheck here (dependents use service_started).
     deploy:
       resources:
         limits:
@@ -192,7 +191,7 @@ services:
       redis:
         condition: service_healthy
       qdrant:
-        condition: service_healthy
+        condition: service_started
       rabbitmq:
         condition: service_healthy
     restart: unless-stopped
@@ -235,7 +234,11 @@ services:
     environment:
       - NEXT_PUBLIC_API_URL=http://backend:8400
     ports:
-      - "3000:3000"
+      # Host-published for optional local access. Moved off 3000 to avoid clashing
+      # with a local `npm run dev`. The public tunnel doesn't use this — it reaches
+      # the frontend through Caddy on the internal network — so the host port is
+      # only for browsing the UI directly at http://localhost:3002.
+      - "3002:3000"
     depends_on: [backend]
     restart: unless-stopped
 

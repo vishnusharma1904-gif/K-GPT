@@ -1,0 +1,44 @@
+# =============================================================================
+# Public access without ngrok — Caddy reverse-proxy + Cloudflare Tunnel.
+#
+# Caddy puts the frontend and backend behind ONE origin; cloudflared exposes that
+# origin to the internet over an OUTBOUND connection, so it works from home with
+# no port-forwarding, no static IP, and even behind CGNAT. HTTPS is automatic.
+#
+# Run:
+#   docker compose -f docker-compose.yml -f docker-compose.tunnel.yml up -d --build
+# Get the link (quick tunnel prints a random https URL):
+#   docker compose logs -f cloudflared      # look for https://<random>.trycloudflare.com
+# Send that link to your friend. (The link lives only while your PC + containers
+# are running; see the "stable URL" note below for an always-on / custom-domain
+# setup.)
+# =============================================================================
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    volumes:
+      - ./deployment/Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - backend
+      - frontend
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    # --- Stable URL on your own domain (ACTIVE) ------------------------------
+    # 👉 Paste your Cloudflare Tunnel token between the quotes below, replacing
+    #    PASTE_YOUR_CLOUDFLARE_TUNNEL_TOKEN_HERE (keep the quotes).
+    #    Get it from: Cloudflare > Zero Trust > Networks > Tunnels > your `kgpt`
+    #    tunnel > install screen — it's the long string right after `--token`.
+    #    Also make sure that tunnel's Public Hostname (kgpt.promptpulse.in) points
+    #    at the service  http://caddy:8080  in the Cloudflare dashboard.
+    #    SECURITY: this token is a secret — don't commit the real value to git.
+    command: tunnel --no-autoupdate run --token "eyJhIjoiYzBhM2RiNDYxN2UxZWIyM2YwODNjYjc0MGFmN2FjNmYiLCJ0IjoiOGE3NjBlZDYtNzRjZi00YzIyLTgxYzAtZGNhYzg2YTJlMDVkIiwicyI6Ik56UmlZV1V4TWpJdE5UVXdNeTAwTmpjMUxXSXlZMlF0WWpGaU1XUXhNV1V5TlRVMCJ9"
+    depends_on:
+      - caddy
+
+    # --- Quick tunnel (DISABLED): instant, random trycloudflare.com URL -------
+    # Prefer a temporary random URL instead? Comment out the `command:` above and
+    # uncomment the one line below.
+    # command: tunnel --no-autoupdate --url http://caddy:8080

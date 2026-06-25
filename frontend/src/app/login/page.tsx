@@ -3,6 +3,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import AuthShell, { authLabel, authInput, authButton, authError } from "@/components/AuthShell";
+import OtpStep from "@/components/OtpStep";
 import { api, setToken } from "@/lib/api";
 
 export default function LoginPage() {
@@ -11,22 +12,31 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(false);
+  const [otpEmail, setOtpEmail] = useState("");
+
+  function finish(r: any) {
+    setToken(r.access_token);
+    const u = r.user;
+    if (u.role === "admin") router.push("/admin");
+    else if (!u.profile_complete) router.push("/onboarding");
+    else router.push("/chat");
+  }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setErr(""); setLoading(true);
     try {
       const r = await api.login({ email, password });
-      setToken(r.access_token);
-      router.push(r.user.role === "admin" ? "/admin" : "/chat");
+      if (r.otp_required) { setOtpEmail(r.email); return; }
+      finish(r);
     } catch (e: any) { setErr(e.message); } finally { setLoading(false); }
   }
 
   return (
     <AuthShell
       biome="beaches"
-      title="Welcome back"
-      subtitle="Log in to your K-GPT account."
+      title={otpEmail ? "Verify your email" : "Welcome back"}
+      subtitle={otpEmail ? "Enter the code we emailed you to continue." : "Log in to your K-GPT account."}
       footer={
         <>
           New here?{" "}
@@ -36,6 +46,9 @@ export default function LoginPage() {
         </>
       }
     >
+      {otpEmail ? (
+        <OtpStep email={otpEmail} onVerified={finish} />
+      ) : (
       <form onSubmit={submit} className="space-y-4">
         <div className="space-y-1.5">
           <label className={authLabel}>College email</label>
@@ -59,6 +72,7 @@ export default function LoginPage() {
           Forgot password?
         </Link>
       </form>
+      )}
     </AuthShell>
   );
 }

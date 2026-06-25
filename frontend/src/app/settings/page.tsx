@@ -5,9 +5,14 @@ import { Logo } from "@/components/Logo";
 import { Button, Card } from "@/components/ui/primitives";
 import { api, getToken } from "@/lib/api";
 import SereneBackdrop from "@/components/SereneBackdrop";
-import { ArrowLeft, Trash2, Download, Shield, Brain, Sliders } from "lucide-react";
+import { ArrowLeft, Trash2, Download, Shield, Brain, Sliders, GraduationCap } from "lucide-react";
 
 const STYLES = ["concise", "balanced", "detailed", "formal"];
+const YEARS = [1, 2, 3, 4, 5];
+const SEMS = [1, 2, 3, 4, 5, 6, 7, 8];
+const SECTIONS = ["A", "B", "C", "D", "E", "F"];
+const COURSES = ["B.Tech", "M.Tech", "MBA", "MCA", "Diploma"];
+const BRANCHES = ["CSE", "CSE (AI & ML)", "CSE (Data Science)", "AI & DS", "ECE", "EEE", "Mechanical", "Civil", "IT", "Other"];
 
 export default function SettingsPage() {
   const router = useRouter();
@@ -75,6 +80,21 @@ export default function SettingsPage() {
           onBlur={(e) => save({ custom_instructions: e.target.value })}
           placeholder="e.g. I'm a 2nd-year CSE student. Explain with code examples and keep it brief."
           className="w-full resize-none rounded-lg border border-border bg-surface/60 px-3 py-2 text-sm focus:border-brand focus:outline-none" />
+      </Card>
+
+      <Card className="mb-5 p-5">
+        <h2 className="mb-1 flex items-center gap-2 font-semibold"><GraduationCap size={16} /> Academic details</h2>
+        <p className="mb-4 text-xs text-muted">Set during sign-up and locked. To correct any of these, please contact your admin.</p>
+        <div className="grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-3">
+          {([["Course", prefs.course], ["Branch", prefs.branch], ["Admission year", prefs.admission_year],
+            ["Year (current)", prefs.year], ["Semester", prefs.semester === 1 ? "Odd" : prefs.semester === 2 ? "Even" : null],
+            ["Section", prefs.section]] as const).map(([label, val]) => (
+            <div key={label}>
+              <div className="text-xs text-muted">{label}</div>
+              <div className="text-sm font-medium text-fg">{val ?? "—"}</div>
+            </div>
+          ))}
+        </div>
       </Card>
 
       <Card className="mb-5 p-5">

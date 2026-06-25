@@ -43,6 +43,10 @@ def _client():
             host=settings.qdrant_host,
             port=settings.qdrant_port,
             api_key=settings.qdrant_api_key or None,
+            # Without this, qdrant-client assumes HTTPS as soon as an api_key is
+            # set, which fails ([SSL: WRONG_VERSION_NUMBER]) against the plain-HTTP
+            # Docker Qdrant. Set QDRANT_HTTPS=true only for a TLS cloud endpoint.
+            https=settings.qdrant_https,
             timeout=10,
         )
     except Exception as e:  # noqa: BLE001
@@ -455,13 +459,42 @@ def cache_search(
         return None
 
 
+def cache_search_related(
+    query_embedding: list[float],
+    limit: int = 3,
+    min_score: float = 0.72,
+) -> list[dict]:
+    """Return several RELATED past answers (question + response) above a moderate
+    similarity — used to reuse prior knowledge for the overlapping part of a new
+    question rather than re-asking the LLM from scratch. Empty list on miss."""
+    c = _client()
+    if not c:
+        return []
+    try:
+        results = c.search(
+            collection_name=COLLECTION_CACHE,
+            query_vector=query_embedding,
+            limit=limit,
+            score_threshold=min_score,
+        )
+        return [{
+            "question": r.payload.get("question", ""),
+            "response": r.payload.get("response", ""),
+            "score": r.score,
+        } for r in results]
+    except Exception:
+        return []
+
+
 def cache_store(
     query_embedding: list[float],
     response: str,
     model: str,
     institution_id: str = "ksrmce",
+    question: str = "",
 ) -> None:
-    """Store a response in the semantic cache."""
+    """Store a response in the semantic cache (with the originating question so it
+    can be reused for the overlapping part of future, related questions)."""
     c = _client()
     if not c:
         return
@@ -479,6 +512,7 @@ def cache_store(
                     "response": response,
                     "model": model,
                     "institution_id": institution_id,
+                    "question": question,
                 },
             )],
         )

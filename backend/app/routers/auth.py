@@ -12,7 +12,8 @@ from app.core.config import get_settings
 from app.core.security import (create_access_token, current_user, hash_password,
                                verify_password)
 from app.db import supabase_client as db
-from app.schemas import ForgotReq, LoginReq, ResetReq, SignupReq, TokenResp, VerifyReq
+from app.schemas import (AuthResp, ForgotReq, LoginReq, ResendOtpReq, ResetReq,
+                         SignupReq, TokenResp, VerifyOtpReq, VerifyReq)
 from app.services import mailer
 
 settings = get_settings()
@@ -20,12 +21,26 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
 def _public(u: dict) -> dict:
-    from app.services import safety
+    from app.services import cohort, safety
     data = {k: u.get(k) for k in (
         "id", "email", "full_name", "roll_no", "role", "sub_status",
         "sub_expires_at", "quota_tokens", "used_tokens", "email_verified",
         "tier", "exam_mode", "response_style", "plan",
+        "course", "branch", "section", "admission_year", "department",
     )}
+    # Year + semester are DERIVED from admission_year so they advance with time.
+    data["year"], data["semester"] = cohort.derive(u.get("admission_year"), u.get("course"))
+    # Whether the user has filled the mandatory profile (admins exempt; faculty
+    # use a different required set — department instead of cohort).
+    role = u.get("role")
+    if role in ("admin",):
+        complete = True
+    elif role == "faculty":
+        complete = all(u.get(k) not in (None, "") for k in ("full_name", "department"))
+    else:
+        _required = ("full_name", "roll_no", "course", "branch", "admission_year", "section")
+        complete = all(u.get(k) not in (None, "") for k in _required)
+    data["profile_complete"] = complete
     data["monitored"] = safety.is_monitored(u)
     return data
 
@@ -50,11 +65,25 @@ def _issue_token(user_id: str, kind: str) -> str:
     return raw
 
 
+def _issue_otp(user_id: str) -> str:
+    """Generate a 6-digit email OTP, store its hash with a short TTL, return the
+    plain code (to be emailed — never stored in clear)."""
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    expires = (_now() + timedelta(minutes=settings.otp_ttl_minutes)).isoformat()
+    db.insert_auth_token(user_id, "otp", _hash_token(code), expires)
+    return code
+
+
+def _send_signup_otp(user: dict) -> None:
+    code = _issue_otp(user["id"])
+    mailer.send_otp(user["email"], code, settings.otp_ttl_minutes)
+
+
 def _dt(s: str | None) -> datetime | None:
     return datetime.fromisoformat(s.replace("Z", "+00:00")) if s else None
 
 
-@router.post("/signup", response_model=TokenResp)
+@router.post("/signup", response_model=AuthResp)
 async def signup(req: SignupReq):
     email = req.email.lower()
     domain = email.split("@", 1)[1]
@@ -79,16 +108,17 @@ async def signup(req: SignupReq):
         "daily_msg_limit": settings.default_daily_msgs,
     })
 
+    # Mandatory email-OTP verification for every new (non-admin) user. No access
+    # token is issued until the OTP is confirmed via /verify-otp.
     if not is_admin:
-        raw = _issue_token(user["id"], "verify")
-        link = f"{settings.frontend_url}/verify?token={raw}"
-        mailer.send_verification(email, link)
+        _send_signup_otp(user)
+        return AuthResp(otp_required=True, email=email)
 
     token = create_access_token(user["id"], user["role"])
-    return TokenResp(access_token=token, user=_public(user))
+    return AuthResp(access_token=token, user=_public(user))
 
 
-@router.post("/login", response_model=TokenResp)
+@router.post("/login", response_model=AuthResp)
 async def login(req: LoginReq):
     user = db.get_user_by_email(req.email.lower())
     if not user:
@@ -111,8 +141,46 @@ async def login(req: LoginReq):
 
     if user.get("failed_logins"):
         db.update_user(user["id"], {"failed_logins": 0, "locked_until": None})
+
+    # Mandatory verification gate: an unverified account can't get a session —
+    # re-issue an OTP and route them to the verification screen instead.
+    if not user.get("email_verified") and user.get("role") != "admin":
+        _send_signup_otp(user)
+        return AuthResp(otp_required=True, email=user["email"])
+
+    token = create_access_token(user["id"], user["role"])
+    return AuthResp(access_token=token, user=_public(user))
+
+
+@router.post("/verify-otp", response_model=TokenResp)
+async def verify_otp(req: VerifyOtpReq):
+    user = db.get_user_by_email(req.email.lower())
+    if not user:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid code.")
+    if user.get("email_verified"):
+        token = create_access_token(user["id"], user["role"])
+        return TokenResp(access_token=token, user=_public(user))
+
+    code = (req.code or "").strip()
+    row = db.get_auth_token_for_user(user["id"], _hash_token(code), "otp")
+    if not row or _dt(row["expires_at"]) < _now():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "Invalid or expired code. Request a new one.")
+
+    db.consume_auth_token(row["id"])
+    db.update_user(user["id"], {"email_verified": True})
+    user["email_verified"] = True
     token = create_access_token(user["id"], user["role"])
     return TokenResp(access_token=token, user=_public(user))
+
+
+@router.post("/resend-otp")
+async def resend_otp(req: ResendOtpReq):
+    user = db.get_user_by_email(req.email.lower())
+    # Never reveal whether the account exists / is already verified.
+    if user and not user.get("email_verified"):
+        _send_signup_otp(user)
+    return {"ok": True}
 
 
 @router.get("/me")

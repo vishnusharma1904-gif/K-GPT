@@ -30,7 +30,7 @@ from app.schemas import ChatReq, FeedbackReq, NewSessionReq, SessionPatch
 from app.services import quota_policy as qp
 from app.services import (auto_memory, embeddings, entitlements, fairuse, intent,
                           moderation, prompt_guard, prompting, rag, safety,
-                          smart_router, websearch)
+                          smalltalk, smart_router, websearch)
 
 settings = get_settings()
 router = APIRouter(prefix="/api/chat", tags=["chat"])
@@ -66,7 +66,7 @@ def _cache_eligible(user: dict, req: ChatReq, had_context: bool) -> bool:
     user's context to another."""
     if had_context:
         return False
-    if req.images or req.web_search or req.project_id:
+    if req.images or req.web_search or req.project_id or getattr(req, "strict", False):
         return False
     if getattr(req, "model", None) or getattr(req, "premium", False):
         return False
@@ -210,17 +210,33 @@ async def _build_messages(user: dict, req: ChatReq) -> tuple[list[dict], list[di
     # --- memory + document RAG (Qdrant-first, pgvector fallback) ---
     memory_ctx = None
     query_vec: list[float] | None = None
-    want_memory = req.use_memory and user.get("memory_enabled", True)
-    # Embed once if we either need retrieval or could use the semantic cache.
-    if want_memory or rag.qdrant_enabled():
+    strict = bool(req.strict)
+    # Strict (KB-only) mode always retrieves both the user's documents and the
+    # shared KB, regardless of the personal-memory toggle, because the whole point
+    # is to ground the answer in those documents.
+    want_memory = strict or (req.use_memory and user.get("memory_enabled", True))
+    # Don't search the knowledge base for pure chit-chat (greetings, thanks, byes,
+    # "hi hello", etc.). These add cost/latency and pollute non-educational replies
+    # with irrelevant document context. Strict mode is exempt — it must always
+    # ground in the KB. (Exact greetings are already short-circuited to a canned
+    # reply before this; this also covers the looser/non-exact casual messages.)
+    casual = (not strict) and smalltalk.is_smalltalk(req.message)
+    # The institution-wide shared KB is served to every user (it is not personal
+    # data), so retrieval is gated on `retrieval_possible()` — NOT the personal
+    # memory toggle. Personal documents/memory remain gated on `want_memory`.
+    want_retrieval = (want_memory or rag.retrieval_possible()) and not casual
+    # Embed once if we need retrieval or could use the semantic cache. Skipped for
+    # casual messages so they never trigger a vector search at all.
+    if (want_retrieval or rag.qdrant_enabled()) and not casual:
         try:
             query_vec = rag.embed_query(req.message)
         except Exception:
             query_vec = None
-    if want_memory and query_vec is not None:
+    if want_retrieval and query_vec is not None:
         try:
             lines, mem_citations = rag.retrieve(
-                user["id"], req.message, query_vec, project_id=req.project_id)
+                user["id"], req.message, query_vec, project_id=req.project_id,
+                include_personal=want_memory, include_shared=True)
             if lines:
                 citations.extend(mem_citations)
                 memory_ctx = "\n".join(lines)
@@ -228,8 +244,9 @@ async def _build_messages(user: dict, req: ChatReq) -> tuple[list[dict], list[di
             pass
 
     # --- optional web search grounding (P33) ---
+    # Strict mode is KB-only, so web search is force-disabled there.
     web_ctx = ""
-    if req.web_search:
+    if req.web_search and not strict:
         results = await websearch.search(req.message, k=4)
         # External text is untrusted → strip obvious injected override lines.
         web_ctx = moderation.sanitize_untrusted(websearch.format_context(results))
@@ -243,9 +260,34 @@ async def _build_messages(user: dict, req: ChatReq) -> tuple[list[dict], list[di
 
     combined_ctx = "\n\n".join(c for c in (memory_ctx, web_ctx) if c) or None
 
+    # --- Learned-answer reuse: pull RELATED past answers so the model reuses the
+    #     overlapping part (e.g. a definition already answered for someone else)
+    #     and only generates the new part. Disabled in strict (KB-docs-only) mode.
+    #     Deliberately NOT counted as had_context, so the fuller new answer is
+    #     still cached for future reuse.
+    learned_ctx = None
+    if not strict and query_vec is not None:
+        try:
+            learned = rag.retrieve_learned(query_vec)
+            if learned:
+                learned_ctx = moderation.sanitize_untrusted("\n".join(learned))
+        except Exception:
+            pass
+
     name = (user.get("full_name") or "").split(" ")[0] or None
     profile = auto_memory.profile_block(user["id"]) if user.get("memory_enabled", True) else None
     is_admin = user.get("role") == "admin"
+    # Cohort line from the student's profile. Year + semester are DERIVED from
+    # admission_year + today's date so they advance automatically over time.
+    from app.services import cohort as _cohort
+    _cy, _cs = _cohort.derive(user.get("admission_year"), user.get("course"))
+    _bits = []
+    if user.get("course"): _bits.append(str(user["course"]))
+    if user.get("branch"): _bits.append(str(user["branch"]))
+    if _cy: _bits.append(f"Year {_cy}")
+    if _cs: _bits.append("Odd semester" if _cs == 1 else "Even semester")
+    if user.get("section"): _bits.append(f"Section {user['section']}")
+    cohort = (", ".join(_bits) + ".") if _bits else None
     sys = prompting.build_system_prompt(
         persona=req.persona,
         student_name=name,
@@ -255,7 +297,10 @@ async def _build_messages(user: dict, req: ChatReq) -> tuple[list[dict], list[di
         memory_context=combined_ctx,
         has_untrusted_docs=bool(req.web_search or memory_ctx),
         user_profile=profile,
+        cohort=cohort,
         is_admin=is_admin,
+        strict=strict,
+        learned_context=learned_ctx,
     )
     if project and project.get("instructions"):
         sys += f"\n\nProject context — {project['name']}:\n{project['instructions']}"
@@ -406,6 +451,19 @@ async def chat(req: ChatReq, request: Request, claims: dict = Depends(current_us
             db.update_session(session_id, user["id"], {"project_id": req.project_id})
         req.session_id = session_id
 
+    # --- Instant canned reply for greetings / identity small-talk (no LLM) ---
+    canned = None if req.images else smalltalk.match(req.message)
+    if canned:
+        db.add_message(session_id, user["id"], "user", req.message)
+        db.add_message(session_id, user["id"], "assistant", canned,
+                       model="kgpt-smalltalk", tokens=0)
+        db.touch_session(session_id)
+        return {
+            "session_id": session_id, "reply": canned, "model": "kgpt-smalltalk",
+            "category": "smalltalk", "citations": [],
+            "usage": entitlements.usage_view(user),
+        }
+
     msgs, citations, meta = await _build_messages(user, req)
     chosen = _chosen_model(user, req)
     category = "custom" if chosen else _category(user, req.message, allow_premium, req.category, bool(req.images))
@@ -455,7 +513,7 @@ async def chat(req: ChatReq, request: Request, claims: dict = Depends(current_us
 
     # Cache only generic, non-personalised answers that passed the output guard.
     if eligible and meta["vec"] is not None and reply_text != prompt_guard.OUTPUT_REDACTION:
-        rag.cache_store(meta["vec"], reply_text, result["model"])
+        rag.cache_store(meta["vec"], reply_text, result["model"], question=req.message)
 
     usage = entitlements.usage_view(db.get_user(user["id"]))  # percentage only
     return {
@@ -499,6 +557,23 @@ async def chat_stream(req: ChatReq, request: Request, claims: dict = Depends(cur
         if req.project_id:
             db.update_session(session_id, user["id"], {"project_id": req.project_id})
         req.session_id = session_id
+
+    # --- Instant canned reply for greetings / identity small-talk (no LLM) ---
+    canned = None if req.images else smalltalk.match(req.message)
+    if canned:
+        async def canned_gen():
+            yield _sse({"event": "session", "session_id": session_id})
+            yield _sse({"event": "delta", "text": canned})
+            db.add_message(session_id, user["id"], "user", req.message)
+            db.add_message(session_id, user["id"], "assistant", canned,
+                           model="kgpt-smalltalk", tokens=0)
+            db.touch_session(session_id)
+            yield _sse({"event": "done", "model": "kgpt-smalltalk",
+                        "usage": entitlements.usage_view(user)})
+        return StreamingResponse(canned_gen(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache, no-transform",
+                                          "Connection": "keep-alive",
+                                          "X-Accel-Buffering": "no"})
 
     msgs, citations, meta = await _build_messages(user, req)
     chosen = _chosen_model(user, req)
@@ -596,7 +671,7 @@ async def chat_stream(req: ChatReq, request: Request, claims: dict = Depends(cur
             if (eligible and meta["vec"] is not None and final
                     and not leaked and text_to_store
                     and prompt_guard.OUTPUT_REDACTION not in text_to_store):
-                rag.cache_store(meta["vec"], text_to_store, final["model"])
+                rag.cache_store(meta["vec"], text_to_store, final["model"], question=req.message)
             usage = entitlements.usage_view(db.get_user(user["id"]))
             yield _sse({"event": "done", "model": (final or {}).get("model", "guard"), "usage": usage})
 
