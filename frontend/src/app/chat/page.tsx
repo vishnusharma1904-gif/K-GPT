@@ -6,7 +6,7 @@ import { Logo } from "@/components/Logo";
 import { Markdown } from "@/components/Markdown";
 import { Citations } from "@/components/Citations";
 import { Button } from "@/components/ui/primitives";
-import { api, streamChat, uploadFile, clearToken, getToken, assetUrl } from "@/lib/api";
+import { api, streamChat, uploadFile, exportDocument, clearToken, getToken, assetUrl, getUploadStatus } from "@/lib/api";
 import CommandPalette from "@/components/CommandPalette";
 import SlashMenu from "@/components/SlashMenu";
 import ArtifactPane, { extractArtifact, type Artifact } from "@/components/ArtifactPane";
@@ -24,7 +24,72 @@ import {
   ChevronUp, ChevronDown, SlidersHorizontal,
 } from "lucide-react";
 
-type Msg = { id?: string; role: "user" | "assistant"; content: string; model?: string; citations?: any[]; feedback?: number; reasoning?: string; ts?: number };
+type Msg = { id?: string; role: "user" | "assistant"; content: string; model?: string; category?: string; citations?: any[]; feedback?: number; reasoning?: string; ts?: number; images?: string[]; attName?: string; tokens?: number; cost?: number };
+
+// Show the export buttons when a reply looks report-like (has a table/chart).
+function hasMarkdownTable(text: string): boolean {
+  return /\n\s*\|.*\|\s*\n\s*\|[\s:|-]+\|\s*\n/.test("\n" + (text || ""));
+}
+
+// --- Markdown table -> CSV (for the one-click "⤓ CSV" download) --------------
+function _splitTableRow(line: string): string[] {
+  let s = line.trim();
+  if (s.startsWith("|")) s = s.slice(1);
+  if (s.endsWith("|")) s = s.slice(0, -1);
+  const cells: string[] = [];
+  let cur = "";
+  for (let j = 0; j < s.length; j++) {
+    const ch = s[j];
+    if (ch === "\\" && s[j + 1] === "|") { cur += "|"; j++; continue; } // escaped pipe in a cell
+    if (ch === "|") { cells.push(cur.trim()); cur = ""; continue; }
+    cur += ch;
+  }
+  cells.push(cur.trim());
+  return cells;
+}
+function _isTableSeparatorRow(line: string): boolean {
+  return /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(line);
+}
+function parseMarkdownTables(text: string): string[][][] {
+  const lines = (text || "").split("\n");
+  const tables: string[][][] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (/^\s*\|.*\|\s*$/.test(line) && i + 1 < lines.length && _isTableSeparatorRow(lines[i + 1])) {
+      const rows: string[][] = [_splitTableRow(line)];
+      i += 2;
+      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) {
+        rows.push(_splitTableRow(lines[i]));
+        i++;
+      }
+      tables.push(rows);
+      continue;
+    }
+    i++;
+  }
+  return tables;
+}
+function tablesToCsv(text: string): string {
+  const escapeCell = (v: string) => (/[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v);
+  return parseMarkdownTables(text)
+    .map((rows) => rows.map((r) => r.map(escapeCell).join(",")).join("\r\n"))
+    .join("\r\n\r\n");
+}
+function downloadCsvFromTables(text: string, filename = "table.csv") {
+  const csv = tablesToCsv(text);
+  if (!csv) return;
+  // BOM so Excel opens UTF-8 CSVs (e.g. non-Latin text) without mangling.
+  const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
 type Session = { id: string; title: string; persona: string };
 
 const PERSONAS = [
@@ -35,12 +100,13 @@ const PERSONAS = [
   { id: "research", name: "Researcher", icon: Search },
 ];
 
-const MODELS = [
+const MODES = [
   { id: "", name: "Auto" },
-  { id: "fast_chat", name: "Fast" },
-  { id: "reasoning", name: "Reasoning" },
-  { id: "coding", name: "Coding" },
-  { id: "long_context", name: "Long context" },
+  { id: "education", name: "Education" },
+  { id: "general", name: "General" },
+  { id: "lifestyle", name: "Lifestyle" },
+  { id: "medical", name: "Medical" },
+  { id: "personal", name: "Personal" },
 ];
 
 const SUGGESTIONS = [
@@ -75,7 +141,7 @@ export default function ChatPage() {
   const [copiedI, setCopiedI] = useState<number | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [images, setImages] = useState<string[]>([]);
-  const [attachment, setAttachment] = useState<{ name: string; status: "uploading" | "ready" | "error"; chunks?: number; msg?: string; shared?: boolean; size?: number; figures?: { url: string; page?: number | null }[] } | null>(null);
+  const [attachment, setAttachment] = useState<{ name: string; status: "uploading" | "processing" | "ready" | "error"; chunks?: number; msg?: string; shared?: boolean; size?: number; documentId?: string; figures?: { url: string; page?: number | null }[] } | null>(null);
   const [dragging, setDragging] = useState(false);
   const dragDepth = useRef(0);
   const [shareUpload, setShareUpload] = useState(false);
@@ -116,6 +182,74 @@ export default function ChatPage() {
   }, [router]);
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
+
+  useEffect(() => {
+    if (!attachment?.documentId || (attachment.status !== "processing" && attachment.status !== "uploading")) return;
+    let cancelled = false;
+    let timer: number | null = null;
+    let attempts = 0;
+    // Safety net: stop polling after ~10 minutes even if the server never
+    // resolves the job, so a stuck/deleted document can't poll forever.
+    const MAX_ATTEMPTS = 330; // ~10 min at the ~1.8s steady-state interval
+
+    const poll = async () => {
+      attempts += 1;
+      try {
+        const r = await getUploadStatus(attachment.documentId!);
+        if (cancelled) return;
+        if (r.status === "ready") {
+          setAttachment((cur) => cur && cur.documentId === r.document_id ? {
+            ...cur,
+            status: "ready",
+            chunks: r.chunks_stored,
+            msg: undefined,
+          } : cur);
+          if (r.suggested_category) { setCategory(r.suggested_category); setModel(""); }
+          return;
+        }
+        if (r.status === "failed") {
+          setAttachment((cur) => cur && cur.documentId === r.document_id ? {
+            ...cur,
+            status: "error",
+            msg: r.error || "Upload processing failed.",
+          } : cur);
+          return;
+        }
+        setAttachment((cur) => cur && cur.documentId === r.document_id ? { ...cur, status: "processing" } : cur);
+      } catch (e: any) {
+        if (cancelled) return;
+        // A 404 means the document row is gone (deleted, or the background job
+        // never created it) — retrying forever just hammers the server with no
+        // possible resolution. Stop and surface it instead of looping silently.
+        const msg = String(e?.message || "");
+        const notFound = /404|not found/i.test(msg);
+        if (notFound) {
+          setAttachment((cur) => cur && cur.documentId === attachment.documentId ? {
+            ...cur,
+            status: "error",
+            msg: "This upload could not be found — it may have been removed or failed to start.",
+          } : cur);
+          return;
+        }
+        // Transient error (network blip, 5xx): keep retrying, but bounded below.
+      }
+      if (!cancelled && attempts < MAX_ATTEMPTS) {
+        timer = window.setTimeout(poll, 1800);
+      } else if (!cancelled) {
+        setAttachment((cur) => cur && cur.documentId === attachment.documentId ? {
+          ...cur,
+          status: "error",
+          msg: "Still processing after 10 minutes — something may be stuck. Try re-uploading.",
+        } : cur);
+      }
+    };
+
+    timer = window.setTimeout(poll, 1200);
+    return () => {
+      cancelled = true;
+      if (timer != null) window.clearTimeout(timer);
+    };
+  }, [attachment?.documentId, attachment?.status]);
 
   // On phones the sidebar is an overlay drawer, so start it closed.
   useEffect(() => {
@@ -164,10 +298,10 @@ export default function ChatPage() {
     setActiveId(id);
     setShowPinned(false);
     const hist = await api.history(id);
-    setMessages(hist.map((m: any) => ({ id: m.id, role: m.role, content: m.content, model: m.model, feedback: m.feedback, ts: m.created_at ? Date.parse(m.created_at) : undefined })));
+    setMessages(hist.map((m: any) => ({ id: m.id, role: m.role, content: m.content, model: m.model, category: m.category, feedback: m.feedback, tokens: m.tokens, cost: m.cost_usd, ts: m.created_at ? Date.parse(m.created_at) : undefined })));
   }
 
-  function newChat() { setActiveId(null); setMessages([]); setShowPinned(false); tts.stop(); }
+  function newChat() { setActiveId(null); setMessages([]); setShowPinned(false); tts.stop(); setCategory(""); }
 
   async function runStream(text: string, sessionId: string | null, imgs: string[] = []) {
     setStreaming(true);
@@ -176,7 +310,7 @@ export default function ChatPage() {
     let sid = sessionId;
     try {
       await streamChat(
-        { message: text, session_id: sessionId, persona, use_memory: true, web_search: webSearch, strict: strictMode, category: category || undefined, model: model || undefined, images: imgs.length ? imgs : undefined },
+        { message: text, session_id: sessionId, persona, use_memory: true, web_search: webSearch, strict: strictMode, category: category || undefined, model: model || undefined, images: imgs.length ? imgs : undefined, attached_source: (attachment && attachment.status === "ready") ? attachment.name : undefined },
         (delta) => setMessages((m) => m.map((msg, i) => i === m.length - 1 ? { ...msg, content: msg.content + delta } : msg)),
         (meta) => {
           if (meta.event === "session") sid = meta.session_id;
@@ -187,7 +321,7 @@ export default function ChatPage() {
             const last = m[m.length - 1];
             const art = extractArtifact(last?.content || "");
             if (art) setArtifact(art);
-            return m.map((msg, i) => i === m.length - 1 ? { ...msg, model: meta.model } : msg);
+            return m.map((msg, i) => i === m.length - 1 ? { ...msg, model: meta.model, category: meta.category, tokens: (meta.prompt_tokens || 0) + (meta.completion_tokens || 0), cost: meta.cost_usd } : msg);
           });
         },
         ac.signal,
@@ -211,9 +345,12 @@ export default function ChatPage() {
     }
     if (voice.listening) voice.stop();
     const imgs = images;
+    const attName = (attachment && attachment.status === "ready") ? attachment.name : undefined;
     setInput(""); setImages([]);
     if (inputRef.current) inputRef.current.style.height = "auto";
-    setMessages((m) => [...m, { role: "user", content: text || "(image)", ts: Date.now() }, { role: "assistant", content: "", ts: Date.now() }]);
+    setMessages((m) => [...m,
+      { role: "user", content: text || (imgs.length ? "" : ""), ts: Date.now(), images: imgs.length ? imgs : undefined, attName },
+      { role: "assistant", content: "", ts: Date.now() }]);
     await runStream(text, activeId, imgs);
   }
 
@@ -251,8 +388,9 @@ export default function ChatPage() {
 
   async function uploadDoc(f: File) {
     const ext = extOf(f.name);
-    const asShared = shareUpload && me?.role === "admin";
-    if (f.size > MAX_FILE_MB * 1024 * 1024) {
+    const asShared = shareUpload && (me?.role === "admin" || me?.role === "faculty");
+    const hasSizeCap = me?.role !== "admin";
+    if (hasSizeCap && f.size > MAX_FILE_MB * 1024 * 1024) {
       setAttachment({ name: f.name, size: f.size, status: "error", shared: asShared,
         msg: `Too large — max ${MAX_FILE_MB} MB.` });
       return;
@@ -265,26 +403,33 @@ export default function ChatPage() {
     setAttachment({ name: f.name, size: f.size, status: "uploading", shared: asShared });
     try {
       const r = await uploadFile(f, undefined, asShared);
-      setAttachment({ name: f.name, size: f.size, status: "ready", chunks: r.chunks_stored, shared: asShared, figures: r.figures });
+      setAttachment({
+        name: f.name,
+        size: f.size,
+        status: r.queued ? "processing" : "ready",
+        chunks: r.chunks_stored,
+        shared: asShared,
+        documentId: r.document_id || undefined,
+        figures: r.figures,
+      });
       if (r.suggested_category) { setCategory(r.suggested_category); setModel(""); }
     } catch (err: any) {
       setAttachment({ name: f.name, size: f.size, status: "error", msg: err.message, shared: asShared });
     }
   }
 
-  // Images (for vision) go to the image strip; everything else is a RAG upload.
-  // When an admin has Shared-KB on, even images are uploaded (OCR'd into the KB).
+  // Files from the Attach button (📎), drag-drop, and paste are always sent
+  // through the document pipeline (uploadDoc → OCR → chunk → embed → memory).
+  // This ensures handwritten notes, scanned pages, and image-based documents
+  // are properly OCR'd and indexed. The separate Image button (🖼️) uses
+  // addImageFile for inline vision, so that path is unaffected.
   function routeFiles(files: FileList | File[]) {
     const arr = Array.from(files);
     if (!arr.length) return;
-    const adminShared = shareUpload && me?.role === "admin";
     let docTaken = false;
     for (const f of arr) {
-      const isImg = f.type.startsWith("image/") || IMG_EXTS.includes(extOf(f.name));
-      if (isImg && !adminShared) {
-        addImageFile(f);
-      } else if (!docTaken) {
-        uploadDoc(f);          // one document at a time
+      if (!docTaken) {
+        uploadDoc(f);          // one document at a time — images go through OCR
         docTaken = true;
       }
     }
@@ -358,6 +503,16 @@ export default function ChatPage() {
   function copyMsg(i: number, text: string) {
     navigator.clipboard?.writeText(text).then(() => { setCopiedI(i); setTimeout(() => setCopiedI(null), 1500); }).catch(() => {});
   }
+
+  async function exportMsg(content: string, fmt: "pdf" | "docx" | "xlsx") {
+    const labels: Record<string, string> = { pdf: "PDF", docx: "Word", xlsx: "Excel" };
+    setNotice(`Generating ${labels[fmt]}…`);
+    try {
+      const title = sessions.find((s) => s.id === activeId)?.title || "K-GPT Document";
+      await exportDocument(content, fmt, title);
+      setNotice("");
+    } catch (e: any) { setNotice(`⚠️ ${e.message}`); setTimeout(() => setNotice(""), 4000); }
+  }
   function scrollToBottom() { endRef.current?.scrollIntoView({ behavior: "smooth" }); }
   function onScroll() {
     const el = scrollRef.current; if (!el) return;
@@ -400,14 +555,14 @@ export default function ChatPage() {
     finally { setTimeout(() => setNotice(""), 4000); }
   }
 
-  function logout() { clearToken(); router.push("/login"); }
+  function logout() { api.logout().catch(() => {}).finally(() => { clearToken(); router.push("/login"); }); }
 
   const pinnedList = useMemo(() => sessions.filter((s) => pinnedChats.has(s.id)), [sessions, pinnedChats]);
   const otherList = useMemo(() => sessions.filter((s) => !pinnedChats.has(s.id)), [sessions, pinnedChats]);
   const visibleMsgs = showPinned ? messages.filter((m) => m.id && pinnedMsgs.has(m.id)) : messages;
 
   return (
-    <div className="flex h-screen overflow-hidden">
+    <div className="flex h-dvh overflow-hidden">
       <SereneBackdrop />
       <CommandPalette extra={[
         { id: "newchat", label: "New chat", group: "Chat", icon: Plus, run: newChat },
@@ -496,9 +651,9 @@ export default function ChatPage() {
             </motion.div>
           )}
         </AnimatePresence>
-        <header className="flex items-center justify-between gap-2 border-b px-3 py-3 sm:px-4">
+        <header className="flex items-center justify-between gap-2 border-b px-3 py-3 pt-safe sm:px-4">
           <div className="flex min-w-0 items-center gap-2 sm:gap-3">
-            {!sidebar && <button onClick={() => setSidebar(true)} className="shrink-0 text-muted hover:text-fg"><Menu size={20} /></button>}
+            {!sidebar && <button onClick={() => setSidebar(true)} aria-label="Open menu" className="-ml-1 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-surface-2 hover:text-fg"><Menu size={20} /></button>}
             <div className="flex gap-1 overflow-x-auto">
               {PERSONAS.map((p) => (
                 <button key={p.id} onClick={() => setPersona(p.id)}
@@ -525,7 +680,7 @@ export default function ChatPage() {
             <button onClick={() => { const e = new KeyboardEvent("keydown", { key: "?" }); window.dispatchEvent(e); }}
               title="Keyboard shortcuts (?)" className="hidden text-muted hover:text-fg sm:block"><Keyboard size={18} /></button>
             {activeId && <button onClick={share} title="Share read-only link" className="text-muted hover:text-fg"><Share2 size={18} /></button>}
-            {me && me.sub_status !== "active" && me.role !== "admin" && (
+            {me && me.sub_status !== "active" && me.role !== "admin" && me.role !== "faculty" && (
               <Button size="sm" variant="outline" onClick={() => router.push("/account")}>Activate access</Button>
             )}
           </div>
@@ -564,7 +719,7 @@ export default function ChatPage() {
                   <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${m.role === "user" ? "bg-surface-2" : "bg-gradient-to-br from-brand/20 to-accent/15 text-brand"}`}>
                     {m.role === "user" ? <User size={16} /> : <Sparkles size={16} />}
                   </div>
-                  <div className={`relative max-w-[82%] rounded-2xl px-4 py-2.5 ${m.role === "user" ? "bg-gradient-to-br from-brand to-brand-2 text-brand-fg shadow-glow" : "glass"} ${isPinned ? "ring-1 ring-brand/40" : ""}`}>
+                  <div className={`relative max-w-[88%] rounded-2xl px-3.5 py-2.5 sm:max-w-[82%] sm:px-4 ${m.role === "user" ? "bg-gradient-to-br from-brand to-brand-2 text-brand-fg shadow-glow" : "glass"} ${isPinned ? "ring-1 ring-brand/40" : ""}`}>
                     {isPinned && <Star size={11} className="absolute -left-1.5 -top-1.5 fill-brand text-brand" />}
                     {m.role === "assistant" ? (
                       <>
@@ -576,7 +731,10 @@ export default function ChatPage() {
                               : (!streaming && !m.reasoning ? <span className="text-sm text-muted">Stopped.</span> : null))}
                         {m.citations && <Citations items={m.citations} />}
                         <div className="mt-1.5 flex items-center gap-2 text-[11px] text-muted">
+                          {m.category && <span className="chip uppercase">{m.category}</span>}
                           {m.model && <span className="chip">{m.model.split("/").pop()}</span>}
+                          {m.tokens != null && m.tokens > 0 && <span className="chip">{m.tokens.toLocaleString()} tokens</span>}
+                          {m.cost != null && <span className="chip text-amber-500 font-mono">${m.cost.toFixed(5)}</span>}
                           {m.content && !streaming && (
                             <>
                               <button onClick={() => vote(i, 1)} title="Good response" className={m.feedback === 1 ? "text-brand" : "hover:text-fg"}><ThumbsUp size={12} /></button>
@@ -593,6 +751,22 @@ export default function ChatPage() {
                                 <button onClick={() => setArtifact(extractArtifact(m.content || ""))} title="Open in canvas" className="hover:text-fg"><PanelRight size={12} /></button>
                               )}
                               <button onClick={() => copyMsg(i, m.content)} title="Copy message" className="hover:text-fg">{copiedI === i ? <Check size={12} /> : <Copy size={12} />}</button>
+                              {(hasMarkdownTable(m.content) || /```chart/.test(m.content) || m.content.length > 300) && (
+                                <span className="inline-flex items-center gap-1.5">
+                                  <Download size={12} className="opacity-70" />
+                                  <button onClick={() => exportMsg(m.content, "pdf")} title="Download as PDF (tables + charts)" className="hover:text-fg">PDF</button>
+                                  <span className="opacity-40">·</span>
+                                  <button onClick={() => exportMsg(m.content, "docx")} title="Download as Word" className="hover:text-fg">Word</button>
+                                  <span className="opacity-40">·</span>
+                                  <button onClick={() => exportMsg(m.content, "xlsx")} title="Download as Excel (tables + charts)" className="hover:text-fg">Excel</button>
+                                  {hasMarkdownTable(m.content) && (
+                                    <>
+                                      <span className="opacity-40">·</span>
+                                      <button onClick={() => downloadCsvFromTables(m.content)} title="Download table(s) as CSV — opens in Excel" className="hover:text-fg">CSV</button>
+                                    </>
+                                  )}
+                                </span>
+                              )}
                               {m.ts && <span className="opacity-60">{new Date(m.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>}
                             </>
                           )}
@@ -600,7 +774,21 @@ export default function ChatPage() {
                       </>
                     ) : (
                       <div>
-                        <p className="whitespace-pre-wrap text-sm">{m.content}</p>
+                        {m.images && m.images.length > 0 && (
+                          <div className="mb-2 flex flex-wrap gap-2">
+                            {m.images.map((src, k) => (
+                              // eslint-disable-next-line @next/next/no-img-element
+                              <img key={k} src={src} alt="attachment" className="h-32 w-32 rounded-lg object-cover ring-1 ring-white/25" />
+                            ))}
+                          </div>
+                        )}
+                        {m.attName && (
+                          <div className="mb-2 inline-flex max-w-full items-center gap-2 rounded-lg bg-fg/10 px-2.5 py-1.5 text-xs">
+                            <Paperclip size={12} className="shrink-0" />
+                            <span className="truncate">{m.attName}</span>
+                          </div>
+                        )}
+                        {m.content && <p className="whitespace-pre-wrap text-sm">{m.content}</p>}
                         {!streaming && (
                           <div className="mt-1 flex items-center gap-3 text-[11px] text-brand-fg/70">
                             <button onClick={() => editBranch(i)} title="Edit & branch" className="hover:text-brand-fg">Edit & branch</button>
@@ -623,7 +811,7 @@ export default function ChatPage() {
             <ArrowDown size={16} />
           </button>
         )}
-        <div className="border-t p-4">
+        <div className="border-t p-3 pb-[calc(env(safe-area-inset-bottom)+0.75rem)] sm:p-4 sm:pb-4">
           {notice && <p className="mx-auto mb-2 max-w-3xl text-center text-xs text-brand">{notice}</p>}
           <div className="mx-auto max-w-3xl">
             <div className="mb-1 flex justify-end">
@@ -640,7 +828,7 @@ export default function ChatPage() {
               <select value={category} onChange={(e) => setCategory(e.target.value)} disabled={!!model}
                 title={model ? "Clear the model pick to use smart routing" : "Routing mode"}
                 className="h-8 rounded-lg border border-border bg-surface-2 px-2 text-fg focus:border-brand focus:outline-none disabled:opacity-50">
-                {MODELS.map((mm) => <option key={mm.id} value={mm.id}>{mm.name}</option>)}
+                {MODES.map((mm) => <option key={mm.id} value={mm.id}>{mm.name}</option>)}
               </select>
               {canPick && (
                 <select value={model} onChange={(e) => setModel(e.target.value)}
@@ -673,7 +861,7 @@ export default function ChatPage() {
                 className="flex items-center gap-1 rounded-lg border border-brand/30 bg-brand/10 px-2.5 py-1 font-medium text-brand transition-colors hover:bg-brand/20">
                 <Paperclip size={13} /> Attach
               </button>
-              {me?.role === "admin" && (
+              {(me?.role === "admin" || me?.role === "faculty") && (
                 <button onClick={() => setShareUpload((v) => !v)}
                   title="When on, the next file you attach is stored in the shared knowledge base — every user's questions will be answered from it."
                   className={`flex items-center gap-1 rounded-lg px-2 py-1 transition-colors ${shareUpload ? "bg-brand/15 text-brand" : "text-muted hover:bg-surface-2"}`}>
@@ -681,7 +869,7 @@ export default function ChatPage() {
                 </button>
               )}
               <input ref={fileRef} type="file" className="hidden" onChange={onFile}
-                accept=".pdf,.docx,.pptx,.xlsx,.xls,.csv,.txt,.md,.png,.jpg,.jpeg,.webp" />
+                accept=".pdf,.docx,.pptx,.xlsx,.xls,.csv,.txt,.md,.png,.jpg,.jpeg,.webp,.bmp,.tiff,.tif" />
               <button onClick={() => imageRef.current?.click()} title="Attach image (vision)" className="flex items-center gap-1 rounded-lg px-2 py-1 text-muted hover:bg-surface-2">
                 <ImageIcon size={13} /> Image
               </button>
@@ -737,6 +925,9 @@ export default function ChatPage() {
                       {attachment.status === "uploading" && (
                         <span className="text-muted">{attachment.shared ? "Uploading to shared knowledge base…" : "Uploading & indexing…"}</span>
                       )}
+                      {attachment.status === "processing" && (
+                        <span className="text-muted">{attachment.shared ? "OCR + indexing in shared knowledge base..." : "OCR + indexing in background..."}</span>
+                      )}
                       {attachment.status === "ready" && (
                         <span className="inline-flex items-center gap-1 text-emerald-400">
                           <CheckCircle2 size={12} />
@@ -747,7 +938,7 @@ export default function ChatPage() {
                         <span className="inline-flex items-center gap-1 text-danger"><AlertCircle size={12} /> {attachment.msg || "Upload failed"}</span>
                       )}
                     </div>
-                    {attachment.status === "uploading" && (
+                    {(attachment.status === "uploading" || attachment.status === "processing") && (
                       <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-surface">
                         <motion.div className="h-full w-1/3 rounded-full bg-gradient-to-r from-brand to-brand-2"
                           animate={{ x: ["-120%", "330%"] }} transition={{ repeat: Infinity, duration: 1.1, ease: "easeInOut" }} />
@@ -813,7 +1004,7 @@ export default function ChatPage() {
               )}
             </div>
           </div>
-          {usage && (me?.role !== "admin") && (
+          {usage && (me?.role !== "admin" && me?.role !== "faculty") && (
             <div className="mx-auto mt-2 flex max-w-3xl flex-wrap items-center justify-center gap-x-2 gap-y-1 text-[11px] text-muted">
               <span className="font-medium text-fg">Daily limit</span>
               <div className="h-1.5 w-32 overflow-hidden rounded-full bg-surface-2">
@@ -829,8 +1020,10 @@ export default function ChatPage() {
               )}
             </div>
           )}
-          {me?.role === "admin" && (
-            <p className="mx-auto mt-2 max-w-3xl text-center text-[11px] text-muted">Admin · no daily limit</p>
+          {(me?.role === "admin" || me?.role === "faculty") && (
+            <p className="mx-auto mt-2 max-w-3xl text-center text-[11px] text-muted">
+              {me?.role === "faculty" ? "Faculty · no daily limit" : "Admin · no daily limit"}
+            </p>
           )}
           {me?.monitored && (
             <p className="mx-auto mt-2 flex max-w-3xl items-center justify-center gap-1.5 text-center text-[11px] text-muted/80">

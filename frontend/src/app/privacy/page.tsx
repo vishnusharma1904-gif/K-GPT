@@ -4,7 +4,7 @@ export const metadata = { title: "Privacy Policy — K-GPT" };
 
 export default function PrivacyPage() {
   return (
-    <LegalShell title="Privacy Policy" subtitle="How Prompt-Pulse handles your data in K-GPT · Last updated: [DD Month 2026]">
+    <LegalShell title="Privacy Policy" subtitle="How Prompt-Pulse handles your data in K-GPT · Last updated: 2 July 2026">
       <P>
         This policy explains what personal data K-GPT collects, why, how we use it (including to improve
         and train our AI models), who we share it with, how we protect it, and the choices and rights you

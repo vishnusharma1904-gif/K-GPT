@@ -20,30 +20,38 @@ from app.services import embeddings, smart_router
 
 _TASKS: set = set()  # keep refs so background tasks aren't GC'd
 
-# Only bother the extractor when the message plausibly states something personal.
+# Aggressively trigger the extractor on ANY first-person pronoun so we don't miss any context.
 _FACT_CUES = (
-    "my ", "i am ", "i'm ", "im ", "i like", "i love", "i hate", "i prefer",
-    "favorite", "favourite", "i work", "i'm working", "i live", "call me",
-    "my name is", "remember that", "remember i", "i study", "i play", "i enjoy",
-    "i want to", "my goal", "i use", "i have a", "i'm from", "i am from",
-    "i'm a ", "i am a ", "you can call me",
+    " i ", " my ", " me ", " mine ", " i'm ", " im ", " i've ", " ive ", " i'll ", " ill ", " i'd ", " id ",
+    "i ", "my ", "me " # Start of string matches
 )
 
 _SYS = (
-    "Extract durable, long-term facts about the USER from their message. "
+    "Extract EVERY piece of context, information, or state the USER provides about themselves. "
     'Return STRICT JSON: {"facts":["short fact", ...]}. '
-    "Only stable, personal facts worth remembering for months — name, preferences "
-    "(favourite food/movie/music), hobbies, goals, ongoing projects, location, what "
-    "they study or do. Write each as a concise third-person statement, e.g. "
-    '"Favourite food is biryani" or "Is working on a robotics project". '
-    "Do NOT include transient task details, questions, or anything not about the user. "
-    'If there is nothing durable, return {"facts":[]}.'
+    "You must aggressively capture ANY personal details: physical attributes (weight, height, age), "
+    "medical conditions/history, dietary preferences, lifestyle, hobbies, goals, ongoing projects, location, "
+    "what they study/do, or their current situation. "
+    "Write each as a concise third-person statement, e.g. "
+    '"Weighs 120kg", "Is working on a robotics project", or "Has a history of CRPS". '
+    "Extract as much detail as possible so you can proactively use it in future conversations. "
+    "Do NOT include the actual questions they are asking you to solve. "
+    'If there is absolutely no personal context, return {"facts":[]}.'
 )
 
 
 def _looks_personal(text: str) -> bool:
     t = " " + text.lower() + " "
     return any(c in t for c in _FACT_CUES)
+
+
+def looks_personal(text: str) -> bool:
+    """Public wrapper — whether `text` references the user themselves (first
+    person pronouns). Used by chat.py to keep self-referential questions
+    ("what's my name", "who am I") out of the shared semantic cache, since
+    their correct answer depends on the user's current memory/profile facts
+    and would otherwise go stale or leak across users."""
+    return _looks_personal(text)
 
 
 def parse_facts(text: str) -> list[str]:
@@ -71,7 +79,7 @@ async def extract_and_store(user_id: str, message: str) -> list[str]:
         res = await smart_router.complete(
             [{"role": "system", "content": _SYS},
              {"role": "user", "content": message[:2000]}],
-            category="instant", max_tokens=256)
+            mode="background", intent="background", max_tokens=256)
         facts = parse_facts(res.get("text", ""))
     except Exception:
         return []

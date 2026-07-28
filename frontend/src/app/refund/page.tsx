@@ -4,7 +4,7 @@ export const metadata = { title: "Cancellation & Refund Policy — K-GPT" };
 
 export default function RefundPage() {
   return (
-    <LegalShell title="Cancellation & Refund Policy" subtitle="For K-GPT subscriptions · Last updated: [DD Month 2026]">
+    <LegalShell title="Cancellation & Refund Policy" subtitle="For K-GPT subscriptions · Last updated: 2 July 2026">
       <P>
         K-GPT is a digital subscription service. This policy explains how cancellations and refunds work.
         By subscribing, you agree to the terms below.

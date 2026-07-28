@@ -18,7 +18,9 @@ apscheduler==3.10.4
 PyMuPDF==1.24.13          # PDF text extraction (P29)
 python-docx==1.1.2        # DOCX extraction (P29)
 python-pptx==1.0.2        # PPTX extraction (P29)
-openpyxl==3.1.5           # XLSX extraction (P29)
+openpyxl==3.1.5           # XLSX extraction + write w/ native charts (P29 + export)
+reportlab==4.2.5          # PDF generation for document export (tables, images)
+matplotlib==3.9.2         # render ```chart specs to PNG for PDF/DOCX export (Agg)
 pytesseract==0.3.13       # OCR for scanned PDFs/images (§6.4) — needs the `tesseract` binary
 Pillow==10.4.0            # image handling for OCR + figure extraction (§6.1/§6.4)
 sentry-sdk==2.19.2        # observability (P5, optional)

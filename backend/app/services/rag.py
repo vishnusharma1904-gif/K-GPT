@@ -83,9 +83,11 @@ def retrieve_learned(vec: list[float]) -> list[str]:
     return lines
 
 
-def retrieve_shared(vec: list[float]) -> list[dict[str, Any]]:
-    """Institution-wide, admin-verified knowledge base — visible to ALL users.
-    Qdrant when configured, else legacy pgvector. Never raises.
+def retrieve_shared(vec: list[float], scope: dict | None = None) -> list[dict[str, Any]]:
+    """Shared knowledge base — admin/faculty-verified documents. HARD-SCOPED to a
+    student's cohort when `scope` ({branch, year, section}) is given; pass
+    `scope=None` (faculty/admin) to search the whole KB. Qdrant when configured,
+    else pgvector. Never raises.
 
     Gated by `kb_relevance_threshold`: chunks must be genuinely similar to the
     query to be returned, so off-topic / non-educational queries get nothing
@@ -94,10 +96,53 @@ def retrieve_shared(vec: list[float]) -> list[dict[str, Any]]:
     try:
         if qdrant_enabled():
             return qdrant_client.search_shared_documents(
-                vec, limit=SHARED_TOP_K, score_threshold=thr)
-        return db.match_shared_memory(vec, limit=SHARED_TOP_K)
+                vec, limit=SHARED_TOP_K, score_threshold=thr, scope=scope)
+        if scope is None:
+            return db.match_shared_memory(vec, limit=SHARED_TOP_K)
+        return db.match_shared_memory_scoped(
+            vec, scope.get("branch"), scope.get("year"), scope.get("section"),
+            limit=SHARED_TOP_K)
     except Exception:
         return []
+
+
+# --- Explicitly attached file ------------------------------------------------
+ATTACH_MAX_CHUNKS = 500
+ATTACH_CHAR_BUDGET = 600000   # ~150k tokens of the attached doc, no threshold
+
+
+def attached_context(user_id: str, source: str) -> tuple[list[str], list[dict[str, Any]]]:
+    """Return (context_lines, citations) for a file the user EXPLICITLY attached in
+    the composer, fetched by source filename — NO similarity threshold — so
+    'summarise / convert / what does this say' always sees the content. Large docs
+    contribute only their start (capped to ATTACH_CHAR_BUDGET). Never raises."""
+    if not source:
+        return [], []
+    try:
+        if qdrant_enabled():
+            rows = qdrant_client.list_document_chunks(user_id, source, ATTACH_MAX_CHUNKS)
+        else:
+            rows = db.list_user_doc_chunks(user_id, source, ATTACH_MAX_CHUNKS)
+    except Exception:
+        rows = []
+    lines: list[str] = []
+    citations: list[dict[str, Any]] = []
+    used = 0
+    for r in rows:
+        snippet = (r.get("content") or "").strip()
+        if not snippet:
+            continue
+        if used + len(snippet) > ATTACH_CHAR_BUDGET:
+            snippet = snippet[: max(0, ATTACH_CHAR_BUDGET - used)]
+        if not snippet:
+            break
+        used += len(snippet)
+        lines.append(f"- [ATTACHED FILE · {source}] {snippet}")
+        citations.append({"type": "document", "source": source,
+                          "id": r.get("id"), "snippet": snippet[:160]})
+        if used >= ATTACH_CHAR_BUDGET:
+            break
+    return lines, citations
 
 
 def embed_query(query: str) -> list[float]:
@@ -109,7 +154,8 @@ def embed_query(query: str) -> list[float]:
 def retrieve(user_id: str, query: str, vec: list[float],
              project_id: str | None = None, *,
              include_personal: bool = True,
-             include_shared: bool = True) -> tuple[list[str], list[dict[str, Any]]]:
+             include_shared: bool = True,
+             shared_scope: dict | None = None) -> tuple[list[str], list[dict[str, Any]]]:
     """Return (context_lines, citations) grounding the answer.
 
     Qdrant-first: reranked document chunks + memory facts. Falls back to the
@@ -127,7 +173,7 @@ def retrieve(user_id: str, query: str, vec: list[float],
     #     Ranked at the top so the model grounds its answer on them before
     #     anything else. Decoupled from the personal-memory toggle on purpose. ---
     if include_shared:
-        for h in retrieve_shared(vec):
+        for h in retrieve_shared(vec, scope=shared_scope):
             src = h.get("source") or "knowledge base"
             snippet = (h.get("content") or "")[:DOC_SNIPPET_CHARS]
             if not snippet:

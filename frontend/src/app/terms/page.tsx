@@ -4,7 +4,7 @@ export const metadata = { title: "Terms & Conditions — K-GPT" };
 
 export default function TermsPage() {
   return (
-    <LegalShell title="Terms & Conditions" subtitle="Agreement between you and Prompt-Pulse · Last updated: [DD Month 2026]">
+    <LegalShell title="Terms & Conditions" subtitle="Agreement between you and Prompt-Pulse · Last updated: 2 July 2026">
       <P>
         These Terms &amp; Conditions (&ldquo;Terms&rdquo;) govern your use of K-GPT, operated by Prompt-Pulse
         (&ldquo;we&rdquo;, &ldquo;us&rdquo;). By creating an account or using the service, you agree to these Terms.
@@ -63,7 +63,7 @@ export default function TermsPage() {
 
       <H2>8. Governing law &amp; contact</H2>
       <P>
-        These Terms are governed by the laws of India, with jurisdiction in the courts of [your city/state].
+        These Terms are governed by the laws of India, with jurisdiction in the courts of Kadapa, Andhra Pradesh.
         Questions: <strong>support@promptpulse.in</strong>.
       </P>
     </LegalShell>

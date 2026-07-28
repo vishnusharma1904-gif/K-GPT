@@ -26,6 +26,7 @@ Queues:
 from __future__ import annotations
 
 import json
+import time
 from functools import lru_cache
 from typing import Any
 
@@ -184,18 +185,33 @@ def publish_analytics_event(event_type: str, user_id: str, data: dict) -> bool:
 
 # === Health ==================================================================
 
+# `available()` used to open a brand-new blocking AMQP connection (full TCP +
+# auth handshake) on EVERY call, and it was being called synchronously on
+# every single document upload (via upload._async_ingest_available) — meaning
+# every upload, no matter how small, paid a full RabbitMQ connection-handshake
+# tax, executed directly on the FastAPI event loop (blocking ALL concurrent
+# requests, not just the upload) before any actual work started. A short TTL
+# cache turns that into one real check per window instead of one per upload.
+_AVAILABLE_CACHE_TTL = 20.0
+_available_cache: tuple[float, bool] | None = None
+
+
 def available() -> bool:
-    """Check if RabbitMQ is reachable."""
+    """Check if RabbitMQ is reachable (cached for `_AVAILABLE_CACHE_TTL`s)."""
+    global _available_cache
+    now = time.monotonic()
+    if _available_cache is not None and (now - _available_cache[0]) < _AVAILABLE_CACHE_TTL:
+        return _available_cache[1]
+
     conn, ch = _get_channel()
-    if not ch:
-        return False
-    try:
-        return True
-    finally:
+    result = bool(ch)
+    if conn:
         try:
             conn.close()
         except Exception:
             pass
+    _available_cache = (now, result)
+    return result
 
 
 def health() -> dict:

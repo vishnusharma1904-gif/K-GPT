@@ -116,6 +116,44 @@ body::after {
 }
 
 /* ============================================================
+   Mobile / touch ergonomics (ChatGPT/Gemini-style on phones)
+   ============================================================ */
+html, body {
+  /* Stop the page itself rubber-banding; inner scrollers still scroll. */
+  overscroll-behavior-y: none;
+  /* No accidental sideways scroll on small screens. */
+  max-width: 100%;
+  overflow-x: hidden;
+}
+/* Honour the dynamic viewport on mobile browsers (URL bar show/hide). */
+.h-dvh { height: 100vh; height: 100dvh; }
+.min-h-dvh { min-height: 100vh; min-height: 100dvh; }
+
+/* Safe-area padding helpers for notches / home indicator. */
+.pb-safe { padding-bottom: env(safe-area-inset-bottom); }
+.pt-safe { padding-top: env(safe-area-inset-top); }
+.px-safe { padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right); }
+
+/* Snappier taps: no grey flash, no double-tap zoom delay on controls. */
+button, a, [role="button"], input, textarea, select, label {
+  -webkit-tap-highlight-color: transparent;
+}
+button, a, [role="button"] { touch-action: manipulation; }
+
+/* iOS zooms the page when focusing an input < 16px. Keep form text at 16px on
+   phones so focusing the composer / auth fields never triggers a zoom jump. */
+@media (max-width: 640px) {
+  /* !important so it beats Tailwind's text-sm utility on the composer/auth inputs. */
+  input:not([type="checkbox"]):not([type="radio"]),
+  textarea, select { font-size: 16px !important; }
+}
+
+/* Comfortable minimum tap target for icon buttons on touch devices. */
+@media (hover: none) and (pointer: coarse) {
+  button, a[role="button"], [role="button"] { -webkit-user-select: none; user-select: none; }
+}
+
+/* ============================================================
    Typography — ultra-crisp, optical sizing
    ============================================================ */
 h1, h2, h3, h4 { letter-spacing: -0.025em; line-height: 1.08; font-weight: 800; }

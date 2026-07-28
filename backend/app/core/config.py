@@ -11,20 +11,53 @@ class Settings(BaseSettings):
     env: str = "development"
     debug: bool = True
     secret_key: str = "CHANGE_ME_dev_secret"
-    access_token_ttl_min: int = 60 * 24 * 7
+    # Access-token lifetime. Kept short (24h) so a stolen JWT has a bounded window;
+    # instant revocation is also available via the per-user token_version kill-switch
+    # (bumped on logout / password reset / suspend — see core.security).
+    access_token_ttl_min: int = 60 * 24
     frontend_url: str = "http://localhost:3000"
+    # Hard cap on a single uploaded file (server-side; the client cap is bypassable).
+    max_upload_mb: int = 25
 
     # --- Environments & feature flags (P4) ----------------------------------
     feature_flags_enabled: bool = True          # use the DB-backed flag service
 
     # --- OCR / handwriting --------------------------------------------------
-    # Tesseract reads printed text for free but is ~useless on handwriting, so
-    # scanned/handwritten pages escalate to a cheap vision model. Default is
-    # Gemini 2.5 Flash-Lite (~$0.001/page) using the existing GEMINI_API_KEY;
-    # swap to e.g. "mistral/mistral-ocr-latest" or a Fireworks Qwen-VL id without
-    # code changes. Set ocr_vision_enabled=false to stay fully offline (Tesseract).
+    # OCR is model-first for handwritten/scanned content: we reuse the existing
+    # app vision models (with failover) instead of a Python OCR engine. This
+    # pinned model is tried first, then the normal vision chain is used.
     ocr_vision_enabled: bool = True
     ocr_vision_model: str = "gemini/gemini-2.5-flash-lite"
+    # Local/self-hosted OCR (handwriting-only routing). A locally-hosted Ollama
+    # model (e.g. on a rented GPU, reached via an SSH tunnel to localhost) is
+    # tried FIRST, but ONLY for images/pages classified as handwritten. Printed
+    # scans and normal documents are untouched by this and keep going through
+    # the existing paid vision chain exactly as before. Off by default — the
+    # tunnel must be confirmed alive before flipping this on in .env.
+    local_ocr_enabled: bool = False
+    # Base model, not a Modelfile-derived one — see backend/.env comment on
+    # LOCAL_OCR_MODEL for why the "qwen-ocr-fixed" derivative was dropped
+    # (2026-07-02: it was image-blind, returning identical output regardless
+    # of input image).
+    #
+    # Backend-agnostic as of 2026-07-02: works with either an Ollama server
+    # (model prefixed "ollama_chat/") or a vLLM OpenAI-compatible server
+    # (model prefixed "openai/", pointing at vLLM's own served model name —
+    # see vision_ocr.py's _local_ocr for how the prefix selects request
+    # behavior). vLLM has native Qwen2.5-VL support (no GGUF translation shim,
+    # no silent internal image resize, real continuous batching instead of
+    # Ollama's one-request-at-a-time limit) and is the recommended backend
+    # going forward; Ollama support is kept only because it's what was set up
+    # first.
+    local_ocr_model: str = "ollama_chat/qwen2.5vl:7b"
+    local_ocr_api_base: str = "http://localhost:11434"
+    # Only used for OpenAI-compatible backends (vLLM). vLLM doesn't validate
+    # this by default unless the server was started with --api-key — "EMPTY"
+    # is the placeholder Qwen's own vLLM docs use. Ignored for ollama_chat.
+    local_ocr_api_key: str = "EMPTY"
+    # Background document queue. Keep off by default until the worker/queue path
+    # is confirmed healthy in the target deployment.
+    async_document_uploads_enabled: bool = False
 
     # --- Background scheduler -----------------------------------------------
     # The nightly entitlements/cost/compression sweep must run on exactly ONE
@@ -99,7 +132,7 @@ class Settings(BaseSettings):
     razorpay_key_id: str = ""
     razorpay_key_secret: str = ""
     razorpay_webhook_secret: str = ""
-    semester_fee_inr: int = 500                 # default semester price (₹) when no plan row exists
+    semester_fee_inr: int = 349                 # default semester price (₹) when no plan row exists
     gst_percent: int = 18                       # GST rate used to split GST-inclusive totals
     gst_included: bool = True                   # Base prices already include GST
     current_semester: str = "2026-ODD"

@@ -22,6 +22,11 @@ def _max_year(course: str | None) -> int:
     return _COURSE_YEARS.get(course.upper().replace(".", "").replace(" ", ""), 4)
 
 
+def _ay_start(today: date) -> int:
+    """The calendar year the current academic year started in (July boundary)."""
+    return today.year if today.month >= 7 else today.year - 1
+
+
 def derive(admission_year: int | None, course: str | None = None,
            today: date | None = None) -> tuple[int | None, int | None]:
     """Return (current_year, semester) where semester is 1 (Odd) or 2 (Even).
@@ -29,8 +34,21 @@ def derive(admission_year: int | None, course: str | None = None,
     if not admission_year:
         return None, None
     today = today or date.today()
-    ay_start = today.year if today.month >= 7 else today.year - 1  # July boundary
-    year = ay_start - int(admission_year) + 1
+    year = _ay_start(today) - int(admission_year) + 1
     sem = 1 if today.month >= 7 else 2
     year = max(1, min(year, _max_year(course)))
     return year, sem
+
+
+def batch_year_for(current_year: int, today: date | None = None) -> int:
+    """Convert a student's STATED current academic year into an effective batch
+    (admission) year, anchored to today's academic calendar.
+
+    We ask students their current year directly instead of their admission year:
+    a detained student keeps their old roll number / admission year but actually
+    studies a year (or more) behind, so deriving the year from the roll-number
+    batch would be wrong. Anchoring from the stated current year fixes that, while
+    still letting the cohort roll forward automatically each July via `derive()`.
+    """
+    today = today or date.today()
+    return _ay_start(today) - (int(current_year) - 1)

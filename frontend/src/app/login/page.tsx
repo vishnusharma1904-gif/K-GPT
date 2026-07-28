@@ -13,8 +13,11 @@ export default function LoginPage() {
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(false);
   const [otpEmail, setOtpEmail] = useState("");
+  const [pending, setPending] = useState(false);
 
   function finish(r: any) {
+    // Faculty accounts are blocked until an admin approves them.
+    if (r.approval_pending) { setPending(true); setOtpEmail(""); return; }
     setToken(r.access_token);
     const u = r.user;
     if (u.role === "admin") router.push("/admin");
@@ -35,18 +38,30 @@ export default function LoginPage() {
   return (
     <AuthShell
       biome="beaches"
-      title={otpEmail ? "Verify your email" : "Welcome back"}
-      subtitle={otpEmail ? "Enter the code we emailed you to continue." : "Log in to your K-GPT account."}
+      title={pending ? "Awaiting approval" : otpEmail ? "Verify your email" : "Welcome back"}
+      subtitle={pending
+        ? "Your faculty account is pending admin approval."
+        : otpEmail ? "Enter the code we emailed you to continue." : "Log in to your K-GPT account."}
       footer={
         <>
           New here?{" "}
-          <Link href="/signup" className="font-medium text-white underline underline-offset-2 hover:text-white/80">
+          <Link href="/signup" className="font-medium text-fg underline underline-offset-2 hover:text-fg/80">
             Create an account
           </Link>
         </>
       }
     >
-      {otpEmail ? (
+      {pending ? (
+        <div className="space-y-4 text-sm text-muted">
+          <p>
+            Your faculty account hasn't been approved yet. An administrator needs
+            to approve it before you can sign in. Please check back later.
+          </p>
+          <button type="button" onClick={() => setPending(false)} className={authButton}>
+            Back to login
+          </button>
+        </div>
+      ) : otpEmail ? (
         <OtpStep email={otpEmail} onVerified={finish} />
       ) : (
       <form onSubmit={submit} className="space-y-4">
@@ -68,7 +83,7 @@ export default function LoginPage() {
         <button type="submit" disabled={loading} className={authButton}>
           {loading ? "Logging in…" : "Log in"}
         </button>
-        <Link href="/forgot" className="block text-center text-sm text-white/60 transition-colors hover:text-white">
+        <Link href="/forgot" className="block text-center text-sm text-muted transition-colors hover:text-fg">
           Forgot password?
         </Link>
       </form>

@@ -35,10 +35,10 @@ export default function AuthShell({
   biome?: string;
 }) {
   return (
-    <main className="relative min-h-screen overflow-hidden">
+    <main className="relative min-h-dvh overflow-hidden">
       <SereneBackdrop />
 
-      <header className="relative z-20 flex items-center justify-between px-6 py-5 sm:px-10">
+      <header className="relative z-20 flex items-center justify-between px-5 py-5 pt-safe sm:px-10">
         <Link href="/" className="text-lg font-semibold tracking-[0.12em] text-fg">
           K&nbsp;GPT
         </Link>
@@ -49,9 +49,9 @@ export default function AuthShell({
         )}
       </header>
 
-      <div className="relative z-10 flex min-h-[calc(100vh-76px)] items-center justify-center px-6 pb-16">
+      <div className="relative z-10 flex min-h-[calc(100dvh-76px)] items-center justify-center px-4 pb-12 sm:px-6 sm:pb-16">
         <div className="w-full max-w-md animate-rise">
-          <div className="glass-strong overflow-hidden rounded-3xl p-8">
+          <div className="glass-strong overflow-hidden rounded-3xl p-6 sm:p-8">
             <h1 className="font-serif text-3xl font-medium tracking-tight text-fg">
               {title}
             </h1>

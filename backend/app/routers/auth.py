@@ -1,19 +1,21 @@
 """Signup / login — college-gated, with email verification, password reset,
-and brute-force lockout (P2)."""
+brute-force lockout, IP/email rate limits, and token revocation (P2 / security)."""
 from __future__ import annotations
 
 import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from app.core.config import get_settings
-from app.core.security import (create_access_token, current_user, hash_password,
-                               verify_password)
+from app.services import fairuse
+from app.core.security import (bump_token_version, create_access_token,
+                               current_user, hash_password,
+                               verify_password_async)
 from app.db import supabase_client as db
 from app.schemas import (AuthResp, ForgotReq, LoginReq, ResendOtpReq, ResetReq,
-                         SignupReq, TokenResp, VerifyOtpReq, VerifyReq)
+                         SignupReq, VerifyOtpReq, VerifyReq)
 from app.services import mailer
 
 settings = get_settings()
@@ -27,16 +29,17 @@ def _public(u: dict) -> dict:
         "sub_expires_at", "quota_tokens", "used_tokens", "email_verified",
         "tier", "exam_mode", "response_style", "plan",
         "course", "branch", "section", "admission_year", "department",
+        "mobile", "faculty_approved",
     )}
     # Year + semester are DERIVED from admission_year so they advance with time.
     data["year"], data["semester"] = cohort.derive(u.get("admission_year"), u.get("course"))
     # Whether the user has filled the mandatory profile (admins exempt; faculty
-    # use a different required set — department instead of cohort).
+    # use a different required set — department + mobile instead of cohort).
     role = u.get("role")
     if role in ("admin",):
         complete = True
     elif role == "faculty":
-        complete = all(u.get(k) not in (None, "") for k in ("full_name", "department"))
+        complete = all(u.get(k) not in (None, "") for k in ("full_name", "department", "mobile"))
     else:
         _required = ("full_name", "roll_no", "course", "branch", "admission_year", "section")
         complete = all(u.get(k) not in (None, "") for k in _required)
@@ -50,8 +53,38 @@ def _roll_from_email(email: str) -> str | None:
     return local.upper() if any(c.isdigit() for c in local) else None
 
 
+def _normalize_mobile(raw: str | None) -> str | None:
+    """Return a clean 10-digit Indian mobile (digits only, leading 0/+91 stripped)
+    or None if it isn't a valid 10-digit number starting 6–9."""
+    if not raw:
+        return None
+    digits = "".join(c for c in raw if c.isdigit())
+    if len(digits) == 12 and digits.startswith("91"):
+        digits = digits[2:]
+    elif len(digits) == 11 and digits.startswith("0"):
+        digits = digits[1:]
+    if len(digits) == 10 and digits[0] in "6789":
+        return digits
+    return None
+
+
+def _issue_or_gate(user: dict) -> AuthResp:
+    """Issue a session — UNLESS this is a faculty account still awaiting admin
+    approval, in which case return approval_pending and no token. Faculty are
+    blocked from getting a session until an admin approves them."""
+    if user.get("role") == "faculty" and not user.get("faculty_approved"):
+        return AuthResp(approval_pending=True, email=user["email"], user=_public(user))
+    token = create_access_token(user["id"], user["role"], user.get("token_version", 0))
+    return AuthResp(access_token=token, user=_public(user))
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _client_ip(request: Request) -> str | None:
+    fwd = request.headers.get("x-forwarded-for")
+    return fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else None)
 
 
 def _hash_token(raw: str) -> str:
@@ -84,7 +117,8 @@ def _dt(s: str | None) -> datetime | None:
 
 
 @router.post("/signup", response_model=AuthResp)
-async def signup(req: SignupReq):
+async def signup(req: SignupReq, request: Request):
+    fairuse.check_ip_rate(_client_ip(request), "signup", 5, 300)   # ≤5 new accounts / 5 min / IP
     email = req.email.lower()
     domain = email.split("@", 1)[1]
     is_admin = email in settings.admin_set
@@ -96,17 +130,36 @@ async def signup(req: SignupReq):
     if db.get_user_by_email(email):
         raise HTTPException(status.HTTP_409_CONFLICT, "Account already exists. Please log in.")
 
-    user = db.create_user({
+    # Student (default) or self-declared faculty. Admins (by config) override.
+    wants_faculty = (req.role or "").strip().lower() == "faculty" and not is_admin
+    new_row = {
         "email": email,
         "full_name": req.full_name.strip(),
         "roll_no": _roll_from_email(email),
         "password_hash": hash_password(req.password),
-        "role": "admin" if is_admin else "student",
+        "role": "admin" if is_admin else ("faculty" if wants_faculty else "student"),
         "sub_status": "active" if is_admin else "inactive",
         "email_verified": is_admin,   # admins are trusted by config
         "quota_tokens": settings.default_quota_tokens,
         "daily_msg_limit": settings.default_daily_msgs,
-    })
+    }
+
+    if wants_faculty:
+        # Faculty must provide a department + a valid contact mobile up front so
+        # the admin has context to approve. The account stays unapproved (blocked)
+        # until an admin signs off — faculty_approved defaults false in the DB.
+        dept = (req.department or "").strip()
+        if not dept:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                                "Faculty sign-up requires your department.")
+        mobile = _normalize_mobile(req.mobile)
+        if not mobile:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                                "Enter a valid 10-digit mobile number.")
+        new_row["department"] = dept
+        new_row["mobile"] = mobile
+
+    user = db.create_user(new_row)
 
     # Mandatory email-OTP verification for every new (non-admin) user. No access
     # token is issued until the OTP is confirmed via /verify-otp.
@@ -114,12 +167,13 @@ async def signup(req: SignupReq):
         _send_signup_otp(user)
         return AuthResp(otp_required=True, email=email)
 
-    token = create_access_token(user["id"], user["role"])
+    token = create_access_token(user["id"], user["role"], user.get("token_version", 0))
     return AuthResp(access_token=token, user=_public(user))
 
 
 @router.post("/login", response_model=AuthResp)
-async def login(req: LoginReq):
+async def login(req: LoginReq, request: Request):
+    fairuse.check_ip_rate(_client_ip(request), "login", 15, 300)   # ≤15 attempts / 5 min / IP
     user = db.get_user_by_email(req.email.lower())
     if not user:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid email or password.")
@@ -130,7 +184,7 @@ async def login(req: LoginReq):
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS,
                             f"Too many attempts. Try again in {mins} minute(s).")
 
-    if not verify_password(req.password, user["password_hash"]):
+    if not await verify_password_async(req.password, user["password_hash"]):
         fails = (user.get("failed_logins") or 0) + 1
         patch: dict = {"failed_logins": fails}
         if fails >= settings.max_failed_logins:
@@ -148,18 +202,23 @@ async def login(req: LoginReq):
         _send_signup_otp(user)
         return AuthResp(otp_required=True, email=user["email"])
 
-    token = create_access_token(user["id"], user["role"])
-    return AuthResp(access_token=token, user=_public(user))
+    # Faculty accounts are blocked until an admin approves them.
+    return _issue_or_gate(user)
 
 
-@router.post("/verify-otp", response_model=TokenResp)
-async def verify_otp(req: VerifyOtpReq):
-    user = db.get_user_by_email(req.email.lower())
+@router.post("/verify-otp", response_model=AuthResp)
+async def verify_otp(req: VerifyOtpReq, request: Request):
+    # Throttle OTP guessing: the code is only 6 digits, so cap attempts per email
+    # and per IP to keep brute force infeasible within the code's short TTL.
+    email_l = req.email.lower()
+    fairuse.check_ip_rate(email_l, "verifyotp", 8, 600)            # ≤8 tries / 10 min / email
+    fairuse.check_ip_rate(_client_ip(request), "verifyotp_ip", 30, 600)
+    user = db.get_user_by_email(email_l)
     if not user:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid code.")
     if user.get("email_verified"):
-        token = create_access_token(user["id"], user["role"])
-        return TokenResp(access_token=token, user=_public(user))
+        # Already verified — still subject to the faculty approval gate.
+        return _issue_or_gate(user)
 
     code = (req.code or "").strip()
     row = db.get_auth_token_for_user(user["id"], _hash_token(code), "otp")
@@ -170,13 +229,17 @@ async def verify_otp(req: VerifyOtpReq):
     db.consume_auth_token(row["id"])
     db.update_user(user["id"], {"email_verified": True})
     user["email_verified"] = True
-    token = create_access_token(user["id"], user["role"])
-    return TokenResp(access_token=token, user=_public(user))
+    # Email is verified, but a faculty account is still blocked until approved.
+    return _issue_or_gate(user)
 
 
 @router.post("/resend-otp")
-async def resend_otp(req: ResendOtpReq):
-    user = db.get_user_by_email(req.email.lower())
+async def resend_otp(req: ResendOtpReq, request: Request):
+    # Stop OTP email-bombing: throttle per target email and per IP.
+    email_l = req.email.lower()
+    fairuse.check_ip_rate(email_l, "resend_email", 3, 600)        # ≤3 / 10 min / email
+    fairuse.check_ip_rate(_client_ip(request), "resend_ip", 8, 600)
+    user = db.get_user_by_email(email_l)
     # Never reveal whether the account exists / is already verified.
     if user and not user.get("email_verified"):
         _send_signup_otp(user)
@@ -189,6 +252,14 @@ async def me(claims: dict = Depends(current_user)):
     if not user:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
     return _public(user)
+
+
+@router.post("/logout")
+async def logout(claims: dict = Depends(current_user)):
+    """Revoke EVERY outstanding token for this user (server-side), so logging out
+    on one device invalidates a stolen/forgotten session everywhere immediately."""
+    bump_token_version(claims["user_id"])
+    return {"ok": True}
 
 
 # --- Email verification -----------------------------------------------------
@@ -215,8 +286,12 @@ async def resend_verification(claims: dict = Depends(current_user)):
 
 # --- Password reset ---------------------------------------------------------
 @router.post("/forgot")
-async def forgot(req: ForgotReq):
-    user = db.get_user_by_email(req.email.lower())
+async def forgot(req: ForgotReq, request: Request):
+    # Stop password-reset email-bombing: throttle per target email and per IP.
+    email_l = req.email.lower()
+    fairuse.check_ip_rate(email_l, "forgot_email", 3, 1800)       # ≤3 / 30 min / email
+    fairuse.check_ip_rate(_client_ip(request), "forgot_ip", 8, 600)
+    user = db.get_user_by_email(email_l)
     # Always return ok — never reveal whether an email exists.
     if user:
         raw = _issue_token(user["id"], "reset")
@@ -234,4 +309,7 @@ async def reset(req: ResetReq):
     db.update_user(row["user_id"],
                    {"password_hash": hash_password(req.password),
                     "failed_logins": 0, "locked_until": None})
+    # A password reset must log out every existing session (the account may have
+    # been compromised) — revoke all outstanding tokens.
+    bump_token_version(row["user_id"])
     return {"ok": True}

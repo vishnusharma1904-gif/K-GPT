@@ -8,6 +8,12 @@
 	handle @api {
 		reverse_proxy backend:8400 {
 			flush_interval -1
+			transport http {
+				dial_timeout 10s
+				response_header_timeout 90s
+				read_timeout 120s
+				write_timeout 120s
+			}
 		}
 	}
 

@@ -153,6 +153,20 @@ def test_p29_upload_to_memory(client):
     assert r.status_code == 200 and r.json()["chunks_stored"] >= 1
 
 
+def test_p29_admin_upload_bypasses_size_cap(client, monkeypatch):
+    from app.routers import upload as upload_router
+
+    adm = _admin(client)
+    old = upload_router.settings.max_upload_mb
+    monkeypatch.setattr(upload_router.settings, "max_upload_mb", 1)
+    try:
+        files = {"file": ("big-notes.txt", b"A" * (2 * 1024 * 1024), "text/plain")}
+        r = client.post("/api/upload", headers=_h(adm), files=files)
+    finally:
+        monkeypatch.setattr(upload_router.settings, "max_upload_mb", old)
+    assert r.status_code == 200 and r.json()["chunks_stored"] >= 1
+
+
 # === P31 — Memory v2 (add / list / delete) ==================================
 def test_p31_memory_crud(client):
     tok = _student(client, "22091a0607@ksrmce.ac.in")

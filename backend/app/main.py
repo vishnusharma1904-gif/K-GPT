@@ -10,9 +10,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import get_settings
 from app.core.observability import (RequestContextMiddleware, init_sentry,
                                     setup_logging)
-from app.routers import (account, admin, auth, billing, chat, feedback, figures,
-                         health, memory, oauth, projects, prompts, share, status,
-                         study, tools, upload, voice)
+from app.routers import (account, admin, auth, billing, chat, export, feedback,
+                         figures, health, memory, oauth, projects, prompts, share,
+                         status, study, tools, upload, voice)
 from app.db import postgres_client, qdrant_client, queue_client
 from prometheus_fastapi_instrumentator import Instrumentator
 
@@ -131,9 +131,14 @@ async def lifespan(app: FastAPI):
         scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="K-GPT API", version="1.2.0", lifespan=lifespan)
+# Disable the interactive API docs / OpenAPI schema in production — they expose
+# the full endpoint surface to anyone. Available in dev for convenience.
+_docs = ({"docs_url": None, "redoc_url": None, "openapi_url": None}
+         if settings.is_prod else {})
+app = FastAPI(title="K-GPT API", version="1.2.0", lifespan=lifespan, **_docs)
 
-# Setup Prometheus metrics
+# Prometheus metrics. Exposed for Grafana; do NOT route /metrics publicly via
+# Caddy/Cloudflare — Prometheus should scrape it over the internal Docker network.
 Instrumentator().instrument(app).expose(app)
 
 app.add_middleware(RequestContextMiddleware)
@@ -169,7 +174,7 @@ for r in (auth.router, oauth.router, chat.router, memory.router, account.router,
           billing.router, admin.router, health.router,
           projects.router, share.router, upload.router, figures.router,
           prompts.router, study.router, tools.router, status.router,
-          feedback.router, voice.router):
+          feedback.router, voice.router, export.router):
     app.include_router(r)
 
 

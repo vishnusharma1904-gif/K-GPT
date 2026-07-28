@@ -49,6 +49,21 @@ def list_users(limit: int = 500) -> list[dict[str, Any]]:
     return sb().table("app_users").select("*").order("created_at", desc=True).limit(limit).execute().data
 
 
+# --- Token revocation kill-switch (security) --------------------------------
+def get_token_version(user_id: str) -> int:
+    r = (sb().table("app_users").select("token_version")
+         .eq("id", user_id).limit(1).execute())
+    return int((r.data[0].get("token_version") or 0)) if r.data else 0
+
+
+def bump_token_version(user_id: str) -> int:
+    """Increment a user's token_version → instantly invalidates every JWT they
+    currently hold. Called on logout, password reset, and admin suspend."""
+    new_v = get_token_version(user_id) + 1
+    sb().table("app_users").update({"token_version": new_v}).eq("id", user_id).execute()
+    return new_v
+
+
 # --- Sessions / messages ----------------------------------------------------
 def create_session(user_id: str, title: str, persona: str) -> dict[str, Any]:
     return sb().table("chat_sessions").insert(
@@ -79,10 +94,12 @@ def delete_session(session_id: str, user_id: str) -> None:
 
 
 def add_message(session_id: str, user_id: str, role: str, content: str,
-                model: str | None = None, tokens: int = 0) -> dict[str, Any]:
+                model: str | None = None, tokens: int = 0,
+                prompt_tokens: int = 0, cost_usd: float = 0.0) -> dict[str, Any]:
     return sb().table("chat_messages").insert({
         "session_id": session_id, "user_id": user_id, "role": role,
         "content": content, "model": model, "tokens": tokens,
+        "prompt_tokens": prompt_tokens, "cost_usd": cost_usd,
     }).execute().data[0]
 
 
@@ -112,37 +129,97 @@ def match_memory(user_id: str, query_embedding: list[float],
 
 # --- Shared institutional knowledge base (admin-uploaded, all users) --------
 def insert_shared_memory(content: str, embedding: list[float],
-                         source: str | None, uploaded_by: str) -> None:
-    """Store a chunk in the institution-wide knowledge base. Visible to every
-    user during retrieval (not scoped to one account)."""
+                         source: str | None, uploaded_by: str,
+                         scope: dict | None = None) -> None:
+    """Store a chunk in the shared knowledge base. Visible to users during
+    retrieval (not scoped to one account). `scope` ({branch, year, section}, any
+    subset) targets it to a cohort — omit/blank dimensions are wildcards
+    ("Everyone")."""
+    scope = scope or {}
+    b = (scope.get("branch") or "").strip().upper() or None
+    s = (scope.get("section") or "").strip().upper() or None
+    y = scope.get("year")
+    try:
+        y = int(y) if y not in (None, "", 0) else None
+    except (TypeError, ValueError):
+        y = None
     sb().table("memory_chunks").insert({
         "user_id": uploaded_by, "content": content, "embedding": embedding,
         "kind": "institution", "source": source,
         "shared": True, "verified": True,
+        "scope_branch": b, "scope_year": y, "scope_section": s,
     }).execute()
 
 
 def match_shared_memory(query_embedding: list[float],
                         limit: int = 6, min_sim: float = 0.40) -> list[dict[str, Any]]:
-    """Semantic search across the shared knowledge base (no user filter)."""
+    """Semantic search across the WHOLE shared knowledge base (no cohort filter).
+    Used for faculty/admin who see every shared document."""
     r = sb().rpc("match_shared_memory", {
         "p_query": query_embedding, "p_limit": limit, "p_min_sim": min_sim,
     }).execute()
     return r.data or []
 
 
+def match_shared_memory_scoped(query_embedding: list[float], branch: str | None,
+                               year: int | None, section: str | None,
+                               limit: int = 6, min_sim: float = 0.40) -> list[dict[str, Any]]:
+    """Cohort-scoped shared-KB search (hard boundary): a chunk matches only if,
+    for each dimension it sets, the value equals the student's. NULL on the chunk
+    is a wildcard. Falls back to the unscoped function if the scoped RPC is absent
+    (migration 014 not yet applied)."""
+    try:
+        r = sb().rpc("match_shared_memory_scoped", {
+            "p_query": query_embedding,
+            "p_branch": (branch or None),
+            "p_year": (int(year) if year else None),
+            "p_section": (section or None),
+            "p_limit": limit, "p_min_sim": min_sim,
+        }).execute()
+        return r.data or []
+    except Exception:
+        # Scoped function not deployed yet — fail closed to unscoped is unsafe, so
+        # return nothing rather than leaking cross-cohort docs.
+        return []
+
+
 def list_shared_documents() -> list[dict[str, Any]]:
     """List shared-KB documents grouped by source filename, with chunk counts."""
-    rows = (sb().table("memory_chunks").select("source,created_at")
+    rows = (sb().table("memory_chunks")
+            .select("source,created_at,scope_branch,scope_year,scope_section")
             .eq("shared", True).execute().data) or []
     grouped: dict[str, dict] = {}
     for r in rows:
         src = r.get("source") or "(untitled)"
-        g = grouped.setdefault(src, {"source": src, "chunks": 0, "created_at": r.get("created_at")})
+        g = grouped.setdefault(src, {
+            "source": src, "chunks": 0, "created_at": r.get("created_at"),
+            "scope_branch": r.get("scope_branch"),
+            "scope_year": r.get("scope_year"),
+            "scope_section": r.get("scope_section"),
+        })
         g["chunks"] += 1
         if r.get("created_at") and r["created_at"] < g["created_at"]:
             g["created_at"] = r["created_at"]
     return sorted(grouped.values(), key=lambda x: x["created_at"] or "", reverse=True)
+
+
+# --- Document registry (background upload/OCR pipeline) ---------------------
+def create_document(row: dict[str, Any]) -> dict[str, Any]:
+    return sb().table("documents").insert(row).execute().data[0]
+
+
+def get_document(document_id: str) -> dict[str, Any] | None:
+    r = sb().table("documents").select("*").eq("id", document_id).limit(1).execute()
+    return r.data[0] if r.data else None
+
+
+def update_document(document_id: str, patch: dict[str, Any]) -> dict[str, Any] | None:
+    r = sb().table("documents").update(patch).eq("id", document_id).execute()
+    return r.data[0] if r.data else None
+
+
+def delete_document(document_id: str) -> None:
+    sb().table("documents").delete().eq("id", document_id).execute()
 
 
 def delete_shared_document(source: str) -> int:
@@ -340,6 +417,16 @@ def list_memory(user_id: str, project_id: str | None = None) -> list[dict[str, A
 
 def delete_memory(chunk_id: str, user_id: str) -> None:
     sb().table("memory_chunks").delete().eq("id", chunk_id).eq("user_id", user_id).execute()
+
+
+def list_user_doc_chunks(user_id: str, source: str, limit: int = 24) -> list[dict[str, Any]]:
+    """Fetch a user's document chunks BY SOURCE filename (pgvector path) so an
+    explicitly attached file can be force-injected into chat context."""
+    if not source:
+        return []
+    return (sb().table("memory_chunks").select("id,content,source,created_at")
+            .eq("source", source).or_(f"user_id.eq.{user_id},shared.eq.true")
+            .order("created_at").limit(limit).execute().data) or []
 
 
 # --- Message feedback + branching (P26) -------------------------------------
@@ -686,3 +773,20 @@ def admin_list_sessions(user_id: str) -> list[dict[str, Any]]:
 def admin_get_messages(session_id: str, user_id: str, limit: int = 1000) -> list[dict[str, Any]]:
     """Admin-side: full message history for a user's session."""
     return get_messages(session_id, user_id, limit=limit)
+
+
+# --- Document Registry shared docs -------------------------------------------
+def list_shared_registry_documents() -> list[dict[str, Any]]:
+    """Retrieve all shared uploads from the documents table, including pending/failed states."""
+    r = sb().table("documents").select("*").order("created_at", desc=True).execute()
+    rows = r.data or []
+    return [
+        row for row in rows
+        if row.get("metadata", {}).get("shared") is True
+    ]
+
+
+def delete_registry_document_by_filename(filename: str) -> None:
+    """Delete registry document entries by filename."""
+    sb().table("documents").delete().eq("filename", filename).execute()
+

@@ -12,6 +12,13 @@ _CODING = ("code", "bug", "function", "python", "java", "c++", "error", "compile
 _REASON = ("prove", "derive", "explain why", "step by step", "math", "theorem",
            "calculate", "reason", "logic", "integral", "derivative", "probability",
            "differential", "matrix", "optimi")
+# Definitional / knowledge questions. These need a CAPABLE model — the tiny 8B
+# fabricates definitions and abbreviations (e.g. answering "what is RAG?" with a
+# made-up "Robotics Assembly and Gear"), so we route them to the reasoning tier.
+_KNOWLEDGE = ("what is", "what's", "whats ", "what are", "what does", "define ",
+              "definition", "meaning of", "full form", "stands for", "abbreviation",
+              "acronym", "difference between", "compare ", "explain ", "how does",
+              "why is", "what do you mean")
 
 # Romanised-Telugu ("Tenglish") markers — common function words students mix in.
 _TENGLISH = ("ela", "enti", "em ", "cheyy", "cheyi", "kavali", "ledu", "unna",
@@ -66,4 +73,6 @@ def classify(text: str) -> str:
         return "coding"
     if any(k in t for k in _REASON):
         return "reasoning"
+    if any(k in t for k in _KNOWLEDGE):
+        return "reasoning"   # definitions/abbreviations → capable model, not the 8B
     return "fast_chat"

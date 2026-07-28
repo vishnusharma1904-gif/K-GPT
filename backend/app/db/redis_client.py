@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any
 
@@ -285,6 +286,71 @@ def session_memory_get(session_id: str) -> dict | None:
 
 
 # === Health ==================================================================
+
+# === Local OCR usage tracking (rented-GPU vs cloud fallback) ===============
+# `vision_ocr.ocr_image()` tries the local/self-hosted model for handwritten
+# document pages, then silently falls back to the paid cloud chain on ANY
+# failure (tunnel down, model unloaded, timeout) — by design, so a broken GPU
+# box never breaks OCR. But "silent" also means nobody notices if the tunnel
+# has been dead for a week and every page has quietly been going to the
+# (working, but no longer free) cloud chain. These counters + the /api/status
+# rollup in routers/status.py are the visibility for that.
+_OCR_LOCAL_WINDOW = 24 * 3600  # rolling ~24h — long enough to see a day's usage
+                                 # pattern, short enough that a fixed tunnel/model
+                                 # issue ages out of the window on its own
+
+
+def ocr_local_record(used: bool, *, latency_s: float | None = None, error: str | None = None) -> None:
+    """Record the outcome of one local-OCR attempt (only called when the local
+    path was actually gated in — i.e. allow_local, local_ocr_enabled, and the
+    handwriting classifier all said yes). Best-effort: fails silently, never
+    allowed to affect the OCR request itself."""
+    r = _pool()
+    if not r:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        pipe = r.pipeline()
+        if used:
+            pipe.incr("ocr:local:hits")
+            pipe.expire("ocr:local:hits", _OCR_LOCAL_WINDOW)
+            pipe.set("ocr:local:last_success_at", now)
+            if latency_s is not None:
+                pipe.set("ocr:local:last_latency_s", f"{latency_s:.2f}")
+        else:
+            pipe.incr("ocr:local:misses")
+            pipe.expire("ocr:local:misses", _OCR_LOCAL_WINDOW)
+            pipe.set("ocr:local:last_failure_at", now)
+            if error:
+                pipe.set("ocr:local:last_error", error[:300])
+        pipe.execute()
+    except Exception:
+        pass
+
+
+def ocr_local_stats() -> dict:
+    """Rolling ~24h local-OCR hit/miss counts + last success/failure timestamps.
+    Returns {"available": False} if Redis isn't configured/reachable — that
+    means usage simply isn't tracked, NOT that the local-OCR path is down."""
+    r = _pool()
+    if not r:
+        return {"available": False}
+    try:
+        keys = ["ocr:local:hits", "ocr:local:misses", "ocr:local:last_success_at",
+                 "ocr:local:last_failure_at", "ocr:local:last_error", "ocr:local:last_latency_s"]
+        hits, misses, last_success_at, last_failure_at, last_error, last_latency_s = r.mget(keys)
+        return {
+            "available": True,
+            "hits_24h": int(hits) if hits else 0,
+            "misses_24h": int(misses) if misses else 0,
+            "last_success_at": last_success_at,
+            "last_failure_at": last_failure_at,
+            "last_error": last_error,
+            "last_latency_s": float(last_latency_s) if last_latency_s else None,
+        }
+    except Exception:
+        return {"available": False}
+
 
 def health() -> dict:
     """Health check info for /api/health."""

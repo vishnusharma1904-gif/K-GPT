@@ -98,8 +98,9 @@ def usage_view(user: dict) -> dict:
 
 # --- Access gate ------------------------------------------------------------
 def check_access(user: dict) -> None:
-    """Raise a structured error if the user can't chat. Admins bypass."""
-    if user.get("role") == "admin":
+    """Raise a structured error if the user can't chat. Admins + faculty bypass
+    (faculty have no student daily quota and need no subscription)."""
+    if user.get("role") in ("admin", "faculty"):
         return
     if user.get("suspended"):
         raise HTTPException(status.HTTP_403_FORBIDDEN,
@@ -132,7 +133,7 @@ def check_access(user: dict) -> None:
 
 def should_downshift(user: dict) -> bool:
     """Near the cap → force cheapest models to stretch the remaining budget."""
-    if user.get("role") == "admin":
+    if user.get("role") in ("admin", "faculty"):
         return False
     pct = p.percent_used(user.get("daily_used") or 0, _effective_cap(user))
     return p.should_downshift(pct)
@@ -255,3 +256,10 @@ def admin_set_suspended(actor_id: str, target_id: str, suspended: bool) -> None:
     db.update_user(target_id, {"suspended": suspended})
     db.insert_entitlement_log(actor_id, target_id,
                               "suspend" if suspended else "restore", 0, "admin")
+    if suspended:
+        # Kick the user out everywhere immediately (revoke all their tokens).
+        from app.core.security import bump_token_version
+        try:
+            bump_token_version(target_id)
+        except Exception:
+            pass

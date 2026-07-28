@@ -12,7 +12,7 @@ create extension if not exists "vector";      -- pgvector (per-user RAG)
 -- ENUMS
 -- ============================================================================
 do $$ begin
-  create type user_role as enum ('student', 'admin');
+  create type user_role as enum ('student', 'admin', 'faculty');
 exception when duplicate_object then null; end $$;
 
 do $$ begin
@@ -29,6 +29,12 @@ create table if not exists app_users (
   roll_no         text,                          -- parsed from college email
   password_hash   text not null,
   role            user_role not null default 'student',
+  -- security: bump to revoke all of a user's outstanding JWTs (see core.security)
+  token_version    integer not null default 0,
+  -- faculty (admin-approved) --------------------------------------------------
+  department       text,                          -- faculty department (vs student cohort)
+  mobile           text,                          -- faculty contact number (required at faculty signup)
+  faculty_approved boolean not null default false, -- gate: no session until an admin approves
   -- subscription / access -----------------------------------------------------
   sub_status      sub_status not null default 'inactive',
   sub_expires_at  timestamptz,                   -- end of paid semester

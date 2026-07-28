@@ -14,10 +14,10 @@ export default function ContactPage() {
       <div className="mt-3 space-y-2 text-[15px] text-fg/85">
         <p><strong>Business name:</strong> Prompt-Pulse</p>
         <p><strong>Product:</strong> K-GPT — Campus AI for KSRMCE</p>
-        <p><strong>Email:</strong> support@promptpulse.in</p>
-        <p><strong>Phone:</strong> [add a reachable phone number]</p>
-        <p><strong>Registered address:</strong> [add your full business/registered address]</p>
+        <p><strong>Email (support &amp; billing):</strong> support@promptpulse.in</p>
+        <p><strong>Grievance Officer:</strong> grievance@promptpulse.in</p>
         <p><strong>Operating hours:</strong> Mon–Sat, 10:00 AM – 6:00 PM IST</p>
+        <p className="text-muted">Email is the fastest way to reach us — we reply within 1–2 business days.</p>
       </div>
 
       <H2>Grievance / data requests</H2>

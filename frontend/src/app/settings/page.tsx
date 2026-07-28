@@ -83,12 +83,18 @@ export default function SettingsPage() {
       </Card>
 
       <Card className="mb-5 p-5">
-        <h2 className="mb-1 flex items-center gap-2 font-semibold"><GraduationCap size={16} /> Academic details</h2>
+        <h2 className="mb-1 flex items-center gap-2 font-semibold">
+          <GraduationCap size={16} /> {prefs.role === "faculty" ? "Faculty details" : "Academic details"}
+        </h2>
         <p className="mb-4 text-xs text-muted">Set during sign-up and locked. To correct any of these, please contact your admin.</p>
         <div className="grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-3">
-          {([["Course", prefs.course], ["Branch", prefs.branch], ["Admission year", prefs.admission_year],
-            ["Year (current)", prefs.year], ["Semester", prefs.semester === 1 ? "Odd" : prefs.semester === 2 ? "Even" : null],
-            ["Section", prefs.section]] as const).map(([label, val]) => (
+          {((prefs.role === "faculty"
+            ? [["Role", "Faculty"], ["Department", prefs.department], ["Mobile", prefs.mobile]]
+            : [["Course", prefs.course], ["Branch", prefs.branch],
+               ["Year (current)", prefs.year ? `Year ${prefs.year}` : null],
+               ["Semester", prefs.semester === 1 ? "Odd" : prefs.semester === 2 ? "Even" : null],
+               ["Section", prefs.section]]) as [string, any][]
+          ).map(([label, val]) => (
             <div key={label}>
               <div className="text-xs text-muted">{label}</div>
               <div className="text-sm font-medium text-fg">{val ?? "—"}</div>

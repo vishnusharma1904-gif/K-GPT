@@ -104,6 +104,10 @@ def _ensure_collections(c) -> None:
             ("document_id", PayloadSchemaType.KEYWORD),
             ("kind", PayloadSchemaType.KEYWORD),
             ("subject", PayloadSchemaType.KEYWORD),
+            # Per-cohort scoping of shared-KB chunks (NULL/absent = Everyone).
+            ("scope_branch", PayloadSchemaType.KEYWORD),
+            ("scope_year", PayloadSchemaType.INTEGER),
+            ("scope_section", PayloadSchemaType.KEYWORD),
         ]:
             try:
                 c.create_payload_index(COLLECTION_DOCUMENTS, field, schema)
@@ -145,6 +149,29 @@ def _ensure_collections(c) -> None:
 
 # === Document Operations ====================================================
 
+def _scope_payload(scope: dict | None) -> dict:
+    """Normalise a {branch, year, section} scope into payload keys, OMITTING any
+    dimension that's a wildcard. Absent key = "Everyone for that dimension", which
+    the retrieval filter treats as IsEmpty. So an unscoped (Everyone) doc carries
+    no scope_* keys — keeping old chunks valid without a backfill."""
+    out: dict = {}
+    if not scope:
+        return out
+    b = (scope.get("branch") or "").strip().upper()
+    s = (scope.get("section") or "").strip().upper()
+    y = scope.get("year")
+    if b:
+        out["scope_branch"] = b
+    if s:
+        out["scope_section"] = s
+    if y not in (None, "", 0):
+        try:
+            out["scope_year"] = int(y)
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
 def upsert_chunks(
     document_id: str,
     chunks: list[dict],
@@ -152,13 +179,15 @@ def upsert_chunks(
     institution_id: str = "ksrmce",
     project_id: str | None = None,
     shared: bool = False,
+    scope: dict | None = None,
 ) -> int:
     """Store document chunks with embeddings in Qdrant.
 
     Each chunk dict must have: 'content', 'embedding' (list[float]), 'index' (int).
     Optional: 'metadata' (dict with topic, subject, keywords, etc.)
-    When `shared=True`, the chunk is part of the institution-wide knowledge base
-    and is retrievable by every user (see search_shared_documents).
+    When `shared=True`, the chunk is part of the shared knowledge base. `scope`
+    (a {branch, year, section} dict, any subset) targets it to a cohort; omit /
+    leave blank for an institution-wide ("Everyone") document.
     Returns the number of chunks stored.
     """
     c = _client()
@@ -167,6 +196,8 @@ def upsert_chunks(
 
     from qdrant_client.models import PointStruct
     import uuid
+
+    scope_payload = _scope_payload(scope) if shared else {}
 
     points = []
     for chunk in chunks:
@@ -184,6 +215,7 @@ def upsert_chunks(
                 "verified": shared,
                 "content": chunk["content"],
                 "source": chunk.get("source", ""),
+                **scope_payload,
                 **(chunk.get("metadata") or {}),
             },
         ))
@@ -197,18 +229,45 @@ def search_shared_documents(
     institution_id: str = "ksrmce",
     limit: int = 6,
     score_threshold: float = 0.3,
+    scope: dict | None = None,
 ) -> list[dict[str, Any]]:
-    """Search ONLY the institution-wide shared knowledge base (shared=true),
-    ignoring user_id so every user sees admin-verified documents."""
+    """Search the shared knowledge base (shared=true), ignoring user_id so every
+    user sees admin/faculty-verified documents — but HARD-SCOPED to the caller's
+    cohort when `scope` is given.
+
+    `scope` = {branch, year, section} (any subset). A chunk is visible iff, for
+    each dimension the chunk SETS, it equals the student's value; a dimension the
+    chunk leaves unset is "Everyone". Pass `scope=None` (faculty/admin) to bypass
+    scoping and see every shared document."""
     c = _client()
     if not c:
         return []
 
-    from qdrant_client.models import Filter, FieldCondition, MatchValue
+    from qdrant_client.models import (Filter, FieldCondition, MatchValue,
+                                      IsEmptyCondition, PayloadField)
 
-    conditions = [FieldCondition(key="shared", match=MatchValue(value=True))]
+    conditions: list = [FieldCondition(key="shared", match=MatchValue(value=True))]
     if institution_id:
         conditions.append(FieldCondition(key="institution_id", match=MatchValue(value=institution_id)))
+
+    # Hard cohort boundary: for each dimension, the chunk must be unset (Everyone)
+    # OR match the student's value. Unset is matched via IsEmpty so old, unscoped
+    # chunks stay visible to everyone without a backfill.
+    if scope is not None:
+        b = (scope.get("branch") or "").strip().upper()
+        s = (scope.get("section") or "").strip().upper()
+        y = scope.get("year")
+        for key, val in (("scope_branch", b), ("scope_section", s), ("scope_year", y)):
+            shoulds: list = [IsEmptyCondition(is_empty=PayloadField(key=key))]
+            if key == "scope_year":
+                if val not in (None, "", 0):
+                    try:
+                        shoulds.append(FieldCondition(key=key, match=MatchValue(value=int(val))))
+                    except (TypeError, ValueError):
+                        pass
+            elif val:
+                shoulds.append(FieldCondition(key=key, match=MatchValue(value=val)))
+            conditions.append(Filter(should=shoulds))
 
     try:
         results = c.search(
@@ -288,6 +347,43 @@ def search_documents(
         return []
 
 
+def list_document_chunks(user_id: str, source: str, limit: int = 24) -> list[dict[str, Any]]:
+    """Fetch a specific user document's chunks BY SOURCE (filename), ordered by
+    chunk index — used to force an explicitly attached file into chat context
+    without any similarity threshold. Returns up to `limit` chunks from the start."""
+    c = _client()
+    if not c or not source:
+        return []
+    from qdrant_client.models import Filter, FieldCondition, MatchValue
+    out: list[dict[str, Any]] = []
+    try:
+        offset = None
+        while len(out) < limit:
+            points, offset = c.scroll(
+                collection_name=COLLECTION_DOCUMENTS,
+                scroll_filter=Filter(must=[
+                    FieldCondition(key="source", match=MatchValue(value=source)),
+                    Filter(should=[
+                        FieldCondition(key="user_id", match=MatchValue(value=user_id)),
+                        FieldCondition(key="shared", match=MatchValue(value=True)),
+                    ]),
+                ]),
+                with_payload=True, with_vectors=False, limit=64, offset=offset,
+            )
+            for p in points:
+                pl = p.payload or {}
+                out.append({"id": str(p.id), "content": pl.get("content", ""),
+                            "source": pl.get("source", ""),
+                            "chunk_index": pl.get("chunk_index", 0)})
+            if offset is None:
+                break
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] Qdrant list_document_chunks failed: {e}")
+        return []
+    out.sort(key=lambda x: x.get("chunk_index", 0))
+    return out[:limit]
+
+
 def delete_document_chunks(document_id: str) -> None:
     """Delete all chunks belonging to a document."""
     c = _client()
@@ -305,6 +401,38 @@ def delete_document_chunks(document_id: str) -> None:
         )
     except Exception as e:
         print(f"[warn] Qdrant delete failed: {e}")
+
+
+def delete_chunks_by_source(user_id: str, source: str, shared: bool = False) -> None:
+    """Delete all EXISTING chunks matching this (user, source) — or (source,
+    shared) for institution docs — before a re-upload writes fresh ones.
+
+    Without this, re-uploading a file with the same name only ADDS a new
+    document_id's worth of chunks on top of whatever was stored the last time.
+    `list_document_chunks` (the explicit-attach path) and similarity search both
+    match by filename, not document_id, so old chunks — including partial/garbled
+    text from a prior failed or lower-quality OCR pass — silently pile up forever
+    and get mixed into every future answer's context and citations for that
+    filename. Calling this immediately before storing new chunks makes a
+    re-upload properly supersede the previous version instead of stacking with
+    it."""
+    c = _client()
+    if not c or not source:
+        return
+    from qdrant_client.models import Filter, FieldCondition, MatchValue
+    try:
+        conditions = [FieldCondition(key="source", match=MatchValue(value=source))]
+        if shared:
+            conditions.append(FieldCondition(key="shared", match=MatchValue(value=True)))
+        else:
+            conditions.append(FieldCondition(key="user_id", match=MatchValue(value=user_id)))
+            conditions.append(FieldCondition(key="shared", match=MatchValue(value=False)))
+        c.delete(
+            collection_name=COLLECTION_DOCUMENTS,
+            points_selector=Filter(must=conditions),
+        )
+    except Exception as e:
+        print(f"[warn] Qdrant delete_chunks_by_source failed: {e}")
 
 
 def list_shared_documents() -> list[dict[str, Any]]:
@@ -325,8 +453,14 @@ def list_shared_documents() -> list[dict[str, Any]]:
                 with_payload=True, with_vectors=False, limit=256, offset=offset,
             )
             for p in points:
-                src = (p.payload or {}).get("source") or "(untitled)"
-                g = grouped.setdefault(src, {"source": src, "chunks": 0, "created_at": None})
+                pl = p.payload or {}
+                src = pl.get("source") or "(untitled)"
+                g = grouped.setdefault(src, {
+                    "source": src, "chunks": 0, "created_at": None,
+                    "scope_branch": pl.get("scope_branch"),
+                    "scope_year": pl.get("scope_year"),
+                    "scope_section": pl.get("scope_section"),
+                })
                 g["chunks"] += 1
             if offset is None:
                 break

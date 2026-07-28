@@ -5,6 +5,8 @@ visible to the admin here (analytics), never to students.
 """
 from __future__ import annotations
 
+import logging
+
 from pydantic import BaseModel, Field
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -18,15 +20,72 @@ from app.services import quota_policy as qp
 
 settings = get_settings()
 router = APIRouter(prefix="/api/admin", tags=["admin"])
+logger = logging.getLogger(__name__)
 
 
 # --- Shared knowledge base (admin-managed institution documents) ------------
 @router.get("/knowledge")
 async def list_knowledge(_: dict = Depends(require_admin)):
-    """List documents in the institution-wide shared knowledge base."""
+    """List documents in the institution-wide shared knowledge base with real-time status."""
     if settings.qdrant_host:
-        return {"documents": qdrant_client.list_shared_documents()}
-    return {"documents": db.list_shared_documents()}
+        actual_docs = qdrant_client.list_shared_documents()
+    else:
+        actual_docs = db.list_shared_documents()
+
+    actual_map = {d["source"]: d for d in actual_docs}
+    registry_docs = db.list_shared_registry_documents()
+
+    merged_docs = []
+    seen_sources = set()
+
+    for r in registry_docs:
+        source = r.get("filename")
+        if not source:
+            # Defensive: skip a partially-written registry row instead of
+            # crashing the whole admin knowledge list.
+            continue
+        seen_sources.add(source)
+
+        actual = actual_map.get(source)
+        chunks = r.get("chunk_count") or 0
+        if actual and actual.get("chunks"):
+            chunks = max(chunks, actual["chunks"])
+
+        metadata = r.get("metadata") or {}
+        scope = metadata.get("scope") or {}
+
+        merged_docs.append({
+            "source": source,
+            "chunks": chunks,
+            "created_at": r.get("created_at"),
+            "status": r.get("status") or "ready",
+            "error": metadata.get("error"),
+            "scope_branch": scope.get("branch"),
+            "scope_year": scope.get("year"),
+            "scope_section": scope.get("section"),
+        })
+
+    for source, actual in actual_map.items():
+        if source not in seen_sources:
+            merged_docs.append({
+                "source": source,
+                "chunks": actual.get("chunks") or 0,
+                "created_at": actual.get("created_at"),
+                "status": "ready",
+                "error": None,
+                "scope_branch": actual.get("scope_branch"),
+                "scope_year": actual.get("scope_year"),
+                "scope_section": actual.get("scope_section"),
+            })
+
+    def get_sort_key(d):
+        ts = d.get("created_at")
+        if not ts:
+            return ""
+        return str(ts)
+
+    merged_docs.sort(key=get_sort_key, reverse=True)
+    return {"documents": merged_docs}
 
 
 @router.delete("/knowledge")
@@ -34,6 +93,9 @@ async def delete_knowledge(source: str, _: dict = Depends(require_admin)):
     """Remove a document (all its chunks) from the shared knowledge base."""
     if not source:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "source is required")
+    
+    db.delete_registry_document_by_filename(source)
+    
     if settings.qdrant_host:
         qdrant_client.delete_shared_document(source)
         return {"ok": True, "source": source}
@@ -75,7 +137,8 @@ def _admin_view(u: dict) -> dict:
         "percent_used": qp.percent_used(u.get("daily_used") or 0, cap),
         "course": u.get("course"), "branch": u.get("branch"),
         "section": u.get("section"), "admission_year": u.get("admission_year"),
-        "department": u.get("department"),
+        "department": u.get("department"), "mobile": u.get("mobile"),
+        "faculty_approved": bool(u.get("faculty_approved")),
         "year": _cohort_year(u)[0], "semester": _cohort_year(u)[1],
     }
 
@@ -90,10 +153,13 @@ def _cohort_year(u: dict):
 async def stats(_: dict = Depends(require_admin)):
     users = db.list_users(limit=5000)
     active = [u for u in users if u.get("sub_status") == "active"]
+    faculty = [u for u in users if u.get("role") == "faculty"]
     return {
         "total_users": len(users),
         "active_subs": len(active),
         "students": len([u for u in users if u.get("role") == "student"]),
+        "faculty": len(faculty),
+        "pending_faculty": len([u for u in faculty if not u.get("faculty_approved")]),
         "heavy_tier": len([u for u in users if u.get("tier") == "heavy"]),
         "suspended": len([u for u in users if u.get("suspended")]),
         "total_tokens_used": sum((u.get("used_tokens") or 0) for u in users),
@@ -228,14 +294,58 @@ async def users_search(q: str | None = None, tier: str | None = None,
     return {"count": len(out), "users": out}
 
 
+@router.get("/faculty/pending")
+async def faculty_pending(_: dict = Depends(require_admin)):
+    """Faculty accounts awaiting approval. Until approved they cannot log in /
+    get a session (the account is blocked)."""
+    rows = [u for u in db.list_users(limit=5000)
+            if u.get("role") == "faculty" and not u.get("faculty_approved")]
+    rows.sort(key=lambda u: u.get("created_at") or "", reverse=True)
+    return {"count": len(rows), "faculty": [_admin_view(u) for u in rows]}
+
+
+@router.post("/faculty/{user_id}/approve")
+async def faculty_approve(user_id: str, admin: dict = Depends(require_admin)):
+    """Approve a faculty account → unblocks login + grants faculty privileges
+    (shared-KB upload, no student quota)."""
+    u = db.get_user(user_id)
+    if not u or u.get("role") != "faculty":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Faculty account not found.")
+    db.update_user(user_id, {"faculty_approved": True, "suspended": False,
+                             "sub_status": "active"})
+    db.insert_entitlement_log(admin["user_id"], user_id, "approve_faculty", 0,
+                              u.get("department") or "")
+    return {"ok": True, "user_id": user_id, "faculty_approved": True}
+
+
+@router.post("/faculty/{user_id}/reject")
+async def faculty_reject(user_id: str, admin: dict = Depends(require_admin)):
+    """Reject/revoke a faculty account → keeps it blocked (unapproved) and
+    suspends it so the person cannot use K-GPT."""
+    u = db.get_user(user_id)
+    if not u or u.get("role") != "faculty":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Faculty account not found.")
+    db.update_user(user_id, {"faculty_approved": False, "suspended": True})
+    db.insert_entitlement_log(admin["user_id"], user_id, "reject_faculty", 0,
+                              u.get("department") or "")
+    from app.core.security import bump_token_version
+    try:
+        bump_token_version(user_id)   # revoke any session immediately
+    except Exception:
+        logger.exception("faculty_reject: failed to revoke sessions for user_id=%s", user_id)
+    return {"ok": True, "user_id": user_id, "faculty_approved": False}
+
+
 class StudentProfileBody(_BM):
     full_name: str | None = None
     roll_no: str | None = None
     course: str | None = None
     branch: str | None = None
     admission_year: int | None = Field(default=None, ge=2000, le=2100)
+    year: int | None = Field(default=None, ge=1, le=5)   # CURRENT year (preferred)
     section: str | None = None
     department: str | None = None
+    mobile: str | None = None
 
 
 @router.patch("/users/{user_id}/profile")
@@ -252,12 +362,31 @@ async def set_student_profile(user_id: str, body: StudentProfileBody,
         patch["course"] = body.course.strip() or None
     if body.branch is not None:
         patch["branch"] = (body.branch.strip().upper() or None)
-    if body.admission_year is not None:
+    # Prefer an explicit current-year edit (converted to an effective batch year so
+    # the cohort still auto-advances); fall back to a raw admission_year if sent.
+    if body.year is not None:
+        from app.services import cohort
+        patch["admission_year"] = cohort.batch_year_for(body.year)
+    elif body.admission_year is not None:
         patch["admission_year"] = body.admission_year
     if body.section is not None:
         patch["section"] = (body.section.strip().upper() or None)
     if body.department is not None:
         patch["department"] = body.department.strip() or None
+    if body.mobile is not None:
+        raw = body.mobile.strip()
+        if not raw:
+            patch["mobile"] = None
+        else:
+            digits = "".join(c for c in raw if c.isdigit())
+            if len(digits) == 12 and digits.startswith("91"):
+                digits = digits[2:]
+            elif len(digits) == 11 and digits.startswith("0"):
+                digits = digits[1:]
+            if len(digits) != 10 or digits[0] not in "6789":
+                raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                                    "Enter a valid 10-digit mobile number.")
+            patch["mobile"] = digits
     if patch:
         db.update_user(user_id, patch)
     return {"ok": True, "user_id": user_id, **patch}
@@ -296,7 +425,8 @@ async def analytics(days: int = 14, _: dict = Depends(require_admin)):
     total_cost = 0.0
     wau = set()
     for r in log:
-        model_mix[r["model"]] += 1
+        if r.get("model") != "error":
+            model_mix[r["model"]] += 1
         total_cost += float(r.get("cost_usd") or 0)
         wau.add(r["user_id"])
 
@@ -420,10 +550,11 @@ async def usage_log(limit: int = 100, _: dict = Depends(require_admin)):
         total_tokens += tot
         total_cost += cost
         m = r.get("model") or "—"
-        agg = by_model.setdefault(m, {"model": m, "requests": 0, "tokens": 0, "cost_usd": 0.0})
-        agg["requests"] += 1
-        agg["tokens"] += tot
-        agg["cost_usd"] = round(agg["cost_usd"] + cost, 6)
+        if m != "error":
+            agg = by_model.setdefault(m, {"model": m, "requests": 0, "tokens": 0, "cost_usd": 0.0})
+            agg["requests"] += 1
+            agg["tokens"] += tot
+            agg["cost_usd"] = round(agg["cost_usd"] + cost, 6)
         feed.append({
             "created_at": r.get("created_at"),
             "user": u.get("full_name") or u.get("email") or r["user_id"][:8],

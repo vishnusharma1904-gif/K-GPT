@@ -9,6 +9,12 @@ class SignupReq(BaseModel):
     email: EmailStr
     full_name: str = Field(min_length=1, max_length=80)
     password: str = Field(min_length=8, max_length=128)
+    # Student (default) or faculty. Faculty self-sign-up is admin-gated: the
+    # account is created but BLOCKED (no session) until an admin approves it.
+    role: str = "student"
+    # Faculty-only, required at sign-up: department + contact mobile number.
+    department: str | None = Field(default=None, max_length=64)
+    mobile: str | None = Field(default=None, max_length=20)
 
 
 class LoginReq(BaseModel):
@@ -46,8 +52,11 @@ class ResendOtpReq(BaseModel):
 
 class AuthResp(BaseModel):
     """Unified signup/login response. When otp_required is True the caller must
-    collect the emailed OTP and call /verify-otp; no access_token is issued yet."""
+    collect the emailed OTP and call /verify-otp; no access_token is issued yet.
+    When approval_pending is True the account is a faculty account awaiting admin
+    approval — email may be verified but no access_token is issued until approved."""
     otp_required: bool = False
+    approval_pending: bool = False
     email: EmailStr | None = None
     access_token: str | None = None
     token_type: str = "bearer"
@@ -56,7 +65,7 @@ class AuthResp(BaseModel):
 
 # --- Chat -------------------------------------------------------------------
 class ChatReq(BaseModel):
-    message: str = Field(min_length=1, max_length=8000)
+    message: str = Field(min_length=0, max_length=8000)
     session_id: str | None = None
     persona: str = "kgpt"
     use_memory: bool = True
@@ -67,6 +76,10 @@ class ChatReq(BaseModel):
     images: list[str] | None = None  # P34 vision: data URLs or https image URLs
     model: str | None = None         # P21 explicit model pick (paid/admin only)
     strict: bool = False             # KB-only: answer solely from retrieved documents
+    # Filename of a file the user just attached in the composer. Its content is
+    # force-injected into context (no similarity threshold) so "summarise/convert
+    # this file" works even when the query doesn't match the document text.
+    attached_source: str | None = Field(default=None, max_length=300)
 
 
 class NewSessionReq(BaseModel):
@@ -125,6 +138,9 @@ class PrefsReq(BaseModel):
     year: int | None = Field(default=None, ge=1, le=5)
     semester: int | None = Field(default=None, ge=1, le=10)
     section: str | None = Field(default=None, max_length=8)
+    # Faculty classification (department + contact mobile)
+    department: str | None = Field(default=None, max_length=64)
+    mobile: str | None = Field(default=None, max_length=20)
 
 
 # --- Billing ----------------------------------------------------------------

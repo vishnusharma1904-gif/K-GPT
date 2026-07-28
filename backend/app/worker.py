@@ -2,7 +2,7 @@
 
 Runs completely decoupled from the FastAPI request path.
 Consumes tasks from RabbitMQ and runs heavy processing pipelines:
-  - Document parsing -> Chunking -> Embedding -> Qdrant
+  - Document OCR/parsing -> Chunking -> Embedding -> Qdrant
   - Memory extraction and aging
   - Analytics processing
 """
@@ -17,9 +17,11 @@ from datetime import datetime
 
 from app.core.config import get_settings
 from app.db import postgres_client, qdrant_client, queue_client
-from app.services import chunking, document_parser, embeddings, memory_extractor, knowledge_graph
+from app.db import supabase_client as db
+from app.services import embeddings, extract, knowledge_graph, memory_extractor, moderation
 
 settings = get_settings()
+MAX_CHUNKS = 500
 
 _SHUTDOWN_EVENT = asyncio.Event()
 
@@ -29,6 +31,61 @@ def _signal_handler(sig, frame):
 
 signal.signal(signal.SIGINT, _signal_handler)
 signal.signal(signal.SIGTERM, _signal_handler)
+
+
+def _store_worker_chunks(
+    *,
+    document_id: str,
+    user_id: str,
+    filename: str | None,
+    chunks: list[str],
+    project_id: str | None,
+    shared: bool,
+    scope: dict | None,
+) -> int:
+    vectors = embeddings.embed_many(chunks)
+
+    if settings.qdrant_host:
+        # Re-uploading the same filename must REPLACE its previous chunks, not
+        # stack on top of them — otherwise stale/partial text from an earlier
+        # (possibly pre-fix, lower-quality OCR) attempt keeps polluting context
+        # and citations for this filename forever.
+        qdrant_client.delete_chunks_by_source(user_id, filename or "", shared=shared)
+        chunk_dicts = [
+            {
+                "index": i,
+                "content": chunk_text,
+                "embedding": vectors[i],
+                "source": filename,
+                "metadata": {"length": len(chunk_text)},
+            }
+            for i, chunk_text in enumerate(chunks)
+        ]
+        return qdrant_client.upsert_chunks(
+            document_id=document_id,
+            chunks=chunk_dicts,
+            user_id=user_id,
+            institution_id="ksrmce",
+            project_id=project_id,
+            shared=shared,
+            scope=scope,
+        )
+
+    stored = 0
+    for i, chunk_text in enumerate(chunks):
+        if shared:
+            db.insert_shared_memory(chunk_text, vectors[i], filename, user_id, scope=scope)
+        else:
+            db.insert_memory_scoped(
+                user_id,
+                chunk_text,
+                vectors[i],
+                kind="document",
+                source=filename,
+                project_id=project_id,
+            )
+        stored += 1
+    return stored
 
 
 async def process_document(data: dict) -> None:
@@ -46,64 +103,68 @@ async def process_document(data: dict) -> None:
     
     try:
         # Mark as processing
-        await postgres_client.execute(
-            "UPDATE documents SET status = 'processing' WHERE id = $1", 
-            document_id
-        )
+        db.update_document(document_id, {"status": "processing"})
+        doc = db.get_document(document_id)
+        metadata = (doc or {}).get("metadata") or {}
+        shared = bool(metadata.get("shared"))
+        project_id = metadata.get("project_id")
+        scope = metadata.get("scope")
 
-        # 1. Resolve the file on disk. The producer either passes an absolute
-        #    path/filename that already exists on the shared volume, or an s3_key
-        #    (object storage). We never fabricate content — a missing file is a
-        #    hard failure so the document is marked 'failed' rather than ingesting
-        #    placeholder text that would silently poison retrieval.
-        file_path = filename if filename and os.path.exists(filename) else f"/tmp/{filename}"
-        if not os.path.exists(file_path):
+        # Resolve the spooled source file. The API stores a local path in s3_key
+        # for now so uploads can return immediately while OCR/embedding happen in
+        # the worker.
+        file_path = s3_key if s3_key and os.path.exists(s3_key) else None
+        if not file_path and doc:
+            stored_path = doc.get("s3_key")
+            if stored_path and os.path.exists(stored_path):
+                file_path = stored_path
+        if not file_path and filename and os.path.exists(filename):
+            file_path = filename
+        if not file_path and filename and os.path.exists(f"/tmp/{filename}"):
+            file_path = f"/tmp/{filename}"
+        if not file_path or not os.path.exists(file_path):
             raise FileNotFoundError(
                 f"Source file not available for document {document_id} "
                 f"(filename={filename!r}, s3_key={s3_key!r})."
             )
 
-        text = document_parser.parse_file(file_path)
+        with open(file_path, "rb") as f:
+            raw = f.read()
+
+        text = extract.extract_text(filename or os.path.basename(file_path), raw)
+        text = moderation.sanitize_untrusted(text, max_chars=200_000)
         if not text.strip():
             raise ValueError("Extracted text is empty.")
 
-        # 2. Chunking
-        chunks = chunking.chunk_text(text, max_tokens=400, overlap_tokens=50)
+        chunks = extract.chunk(text)[:MAX_CHUNKS]
         print(f"[worker] Document split into {len(chunks)} chunks.")
+        if not chunks:
+            raise ValueError("No readable text found after OCR/extraction.")
 
-        # 3. Embed (batched — one network call per _BATCH_SIZE chunks) & 4. Store
-        vectors = embeddings.embed_many(chunks)
-        chunk_dicts = [
-            {
-                "index": i,
-                "content": chunk_text,
-                "embedding": vectors[i],
-                "source": filename,
-                "metadata": {"length": len(chunk_text)},
-            }
-            for i, chunk_text in enumerate(chunks)
-        ]
-
-        stored_count = qdrant_client.upsert_chunks(
+        stored_count = _store_worker_chunks(
             document_id=document_id,
-            chunks=chunk_dicts,
             user_id=user_id,
-            institution_id="ksrmce",
+            filename=filename,
+            chunks=chunks,
+            project_id=project_id,
+            shared=shared,
+            scope=scope,
         )
 
         # Mark as ready
-        await postgres_client.execute(
-            "UPDATE documents SET status = 'ready', chunk_count = $2 WHERE id = $1",
-            document_id, stored_count
-        )
+        db.update_document(document_id, {"status": "ready", "chunk_count": stored_count})
         print(f"[worker] Successfully processed {document_id}. Stored {stored_count} chunks.")
+        try:
+            os.remove(file_path)
+        except Exception:
+            pass
 
     except Exception as e:
         print(f"[worker] Failed to process document {document_id}: {e}")
-        await postgres_client.execute(
-            "UPDATE documents SET status = 'failed', metadata = metadata || jsonb_build_object('error', $2::text) WHERE id = $1",
-            document_id, str(e)
-        )
+        doc = db.get_document(document_id) or {}
+        metadata = dict((doc.get("metadata") or {}))
+        metadata["error"] = str(e)
+        db.update_document(document_id, {"status": "failed", "metadata": metadata})
 
 
 async def process_memory_extraction(data: dict) -> None:

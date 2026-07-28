@@ -17,6 +17,7 @@ optional web search grounding (P33), per-project instructions + knowledge (P30).
 from __future__ import annotations
 
 import json
+import re
 
 from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -28,9 +29,9 @@ from app.db import supabase_client as db
 from app.db import queue_client
 from app.schemas import ChatReq, FeedbackReq, NewSessionReq, SessionPatch
 from app.services import quota_policy as qp
-from app.services import (auto_memory, embeddings, entitlements, fairuse, intent,
+from app.services import (auto_memory, embeddings, entitlements, fairuse,
                           moderation, prompt_guard, prompting, rag, safety,
-                          smalltalk, smart_router, websearch)
+                          smalltalk, smart_router, topic, websearch)
 
 settings = get_settings()
 router = APIRouter(prefix="/api/chat", tags=["chat"])
@@ -57,6 +58,26 @@ def _trim_history(history: list[dict]) -> list[dict]:
     kept.reverse()
     return kept
 
+import hashlib
+from app.db import redis_client
+
+_SYS_PROMPT_VERSION = "v1"
+_KB_VERSION = "v1"
+_MODELS_VERSION = "v8"
+_ROUTING_VERSION = "v8"
+
+def _exact_cache_key(question: str, mode: str) -> str:
+    raw = f"{question}|{mode}|{_SYS_PROMPT_VERSION}|{_KB_VERSION}|{_MODELS_VERSION}|{_ROUTING_VERSION}"
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+_MODE_TTLS = {
+    "general": 30 * 86400,
+    "lifestyle": 14 * 86400,
+    "education": 7 * 86400,
+    "medical": 86400,
+    "personal": 0
+}
+
 
 def _cache_eligible(user: dict, req: ChatReq, had_context: bool) -> bool:
     """Whether a request may be answered from / written to the semantic cache.
@@ -74,6 +95,15 @@ def _cache_eligible(user: dict, req: ChatReq, had_context: bool) -> bool:
         return False
     persona = (req.persona or "").strip().lower()
     if persona and persona not in ("default", "general"):
+        return False
+    # Self-referential questions ("what's my name", "who am I", "what do I
+    # like") are answered from the always-on profile block (auto_memory
+    # facts), NOT from `had_context` — so they'd otherwise pass every check
+    # above even though the correct answer changes as memory updates. The
+    # semantic cache has no per-user scoping, so caching these risks BOTH
+    # serving a stale answer after the user corrects a fact AND leaking one
+    # user's personal answer to a different user who phrases things similarly.
+    if auto_memory.looks_personal(req.message):
         return False
     return True
 
@@ -106,7 +136,9 @@ def _prepare(claims: dict, request: Request, premium: bool):
     """Shared pre-flight for both chat endpoints. Returns (user, allow_premium)."""
     user = _load_user(claims)
     is_admin = user.get("role") == "admin"
-    fairuse.check_rate(user["id"], is_admin)
+    # Faculty are privileged (no student rate/quota), but still must verify email.
+    privileged = user.get("role") in ("admin", "faculty")
+    fairuse.check_rate(user["id"], privileged)
     fairuse.note_ip(user["id"], _client_ip(request))      # anomaly tracking (best-effort)
     user = entitlements.refresh(user)                      # lazy resets
     entitlements.check_access(user)                        # tier cap / sub / suspend
@@ -120,7 +152,7 @@ def _prepare(claims: dict, request: Request, premium: bool):
 
 
 _PICKABLE = {"instant", "fast_chat", "reasoning", "coding", "multilingual",
-             "long_context", "rag", "premium"}
+             "long_context", "rag", "premium", "education", "medical", "lifestyle", "general", "personal"}
 
 
 def _can_pick_model(user: dict) -> bool:
@@ -134,6 +166,22 @@ def _chosen_model(user: dict, req: ChatReq) -> str | None:
         if req.model in valid:
             return req.model
     return None
+
+
+# Bengali through Malayalam (U+0980-U+0D7F) covers Telugu, Tamil, Kannada,
+# Malayalam, Bengali, Gurmukhi/Punjabi, Gujarati, and Odia — the Indic
+# languages NOT on the free Groq models' (Llama 3.1 8B, Gemma2 9B) official
+# supported-language list. Devanagari (Hindi, U+0900-U+097F) is deliberately
+# EXCLUDED: Hindi already works well on the free models, so there's no reason
+# to spend paid credits on it. When this matches, the "multilingual" mode
+# chain (Qwen3.5-9B first, free models as graceful fallback — see models.json)
+# is used instead of "general", so the paid model is only ever reached for
+# messages that actually need it.
+_WEAK_SUPPORT_SCRIPT = re.compile(r"[ঀ-ൿ]")
+
+
+def _needs_multilingual_fallback(message: str) -> bool:
+    return bool(_WEAK_SUPPORT_SCRIPT.search(message or ""))
 
 
 # Output is no longer capped per request — a user may spend their whole daily
@@ -192,7 +240,7 @@ def _category(user: dict, message: str, allow_premium: bool,
         return "premium"
     if requested and requested in _PICKABLE:
         return requested            # P21 user-chosen category
-    return intent.classify(message)
+    return topic.classify(message)
 
 
 async def _build_messages(user: dict, req: ChatReq) -> tuple[list[dict], list[dict], dict]:
@@ -221,6 +269,12 @@ async def _build_messages(user: dict, req: ChatReq) -> tuple[list[dict], list[di
     # ground in the KB. (Exact greetings are already short-circuited to a canned
     # reply before this; this also covers the looser/non-exact casual messages.)
     casual = (not strict) and smalltalk.is_smalltalk(req.message)
+    # Topic of the message (edu/tech/medical/lifestyle/personal/greeting/other).
+    # Used to skip the shared KB for clearly non-academic messages and as a tag.
+    from app.services import topic as _topic
+    classification = _topic.classify(req.message)
+    msg_topic = classification.mode
+    use_shared_kb = strict or _topic.should_use_kb(msg_topic)
     # The institution-wide shared KB is served to every user (it is not personal
     # data), so retrieval is gated on `retrieval_possible()` — NOT the personal
     # memory toggle. Personal documents/memory remain gated on `want_memory`.
@@ -232,14 +286,41 @@ async def _build_messages(user: dict, req: ChatReq) -> tuple[list[dict], list[di
             query_vec = rag.embed_query(req.message)
         except Exception:
             query_vec = None
+    # Per-cohort shared KB: a student only retrieves docs targeted to their
+    # branch / current year / section (or to "Everyone"). Faculty & admin are
+    # unscoped (scope=None) so they search the whole shared KB.
+    from app.services import cohort as _cohort_scope
+    _priv = user.get("role") in ("admin", "faculty")
+    _scope_year = _cohort_scope.derive(user.get("admission_year"), user.get("course"))[0]
+    shared_scope = None if _priv else {
+        "branch": user.get("branch"), "year": _scope_year, "section": user.get("section"),
+    }
     if want_retrieval and query_vec is not None:
         try:
+            # If a file is explicitly attached, disable general RAG search across the entire KB
+            # and other documents to prevent irrelevant documents from polluting the context.
+            inc_personal = want_memory and not bool(req.attached_source)
+            inc_shared = use_shared_kb and not bool(req.attached_source)
+            
             lines, mem_citations = rag.retrieve(
                 user["id"], req.message, query_vec, project_id=req.project_id,
-                include_personal=want_memory, include_shared=True)
+                include_personal=inc_personal, include_shared=inc_shared,
+                shared_scope=shared_scope)
             if lines:
                 citations.extend(mem_citations)
                 memory_ctx = "\n".join(lines)
+        except Exception:
+            pass
+
+    # A file the user EXPLICITLY attached in the composer is force-injected here
+    # (by filename, no similarity threshold) and placed FIRST, so the model always
+    # sees it — fixes "no file is attached" on summarise/convert-style requests.
+    if req.attached_source:
+        try:
+            a_lines, a_cits = rag.attached_context(user["id"], req.attached_source)
+            if a_lines:
+                citations = a_cits + citations
+                memory_ctx = "\n".join(a_lines + ([memory_ctx] if memory_ctx else []))
         except Exception:
             pass
 
@@ -301,6 +382,7 @@ async def _build_messages(user: dict, req: ChatReq) -> tuple[list[dict], list[di
         is_admin=is_admin,
         strict=strict,
         learned_context=learned_ctx,
+        mode=msg_topic,
     )
     if project and project.get("instructions"):
         sys += f"\n\nProject context — {project['name']}:\n{project['instructions']}"
@@ -318,7 +400,8 @@ async def _build_messages(user: dict, req: ChatReq) -> tuple[list[dict], list[di
     else:
         msgs.append({"role": "user", "content": req.message})
 
-    meta = {"vec": query_vec, "had_context": bool(memory_ctx or web_ctx)}
+    meta = {"vec": query_vec, "had_context": bool(memory_ctx or web_ctx),
+            "topic": msg_topic, "classification": classification}
     return msgs, citations, meta
 
 
@@ -465,12 +548,60 @@ async def chat(req: ChatReq, request: Request, claims: dict = Depends(current_us
         }
 
     msgs, citations, meta = await _build_messages(user, req)
+    classification = meta["classification"]
     chosen = _chosen_model(user, req)
-    category = "custom" if chosen else _category(user, req.message, allow_premium, req.category, bool(req.images))
+    # Routed through a dedicated chain (Qwen3.5-9B first, free Groq/Zenmux
+    # models as graceful fallback if it errors) rather than a hard single-model
+    # override — used ONLY when the message needs language support the free
+    # models lack (see _needs_multilingual_fallback), never as a default, and
+    # never for explicit picks or vision (own chain).
+    force_multilingual = (not chosen and not req.images
+                          and _needs_multilingual_fallback(req.message))
+    if chosen:
+        mode, intent_str = "custom", "custom"
+    else:
+        if force_multilingual:
+            mode, intent_str = "multilingual", "multilingual"
+        elif bool(req.images):
+            mode, intent_str = "vision", "vision"
+        elif entitlements.should_downshift(user):
+            mode, intent_str = "general", "instant"
+        elif allow_premium:
+            mode, intent_str = "premium", "premium"
+        elif req.category and req.category in _PICKABLE:
+            mode, intent_str = req.category, req.category
+        else:
+            mode, intent_str = classification.mode, classification.intent
+
+    # --- Exact Match Redis Cache (0 tokens, 1ms) ---
+    eligible = _cache_eligible(user, req, meta["had_context"])
+    ttl = _MODE_TTLS.get(mode, 0)
+    
+    if eligible and ttl > 0:
+        cache_key = _exact_cache_key(req.message, mode)
+        hit = redis_client.cache_get_json("exact", cache_key)
+        if hit and hit.get("response"):
+            reply_text = hit["response"]
+            db.add_message(session_id, user["id"], "user", req.message)
+            db.add_message(session_id, user["id"], "assistant", reply_text,
+                           model=hit.get("model", "exact_cache"), tokens=0)
+            db.touch_session(session_id)
+            auto_memory.schedule(user["id"], req.message, user.get("memory_enabled", True))
+            return {
+                "session_id": session_id,
+                "reply": reply_text,
+                "model": hit.get("model", "exact_cache"),
+                "category": mode,
+                "citations": [],
+                "usage": entitlements.usage_view(user),
+                "cached": True,
+            }
 
     # --- Semantic cache: a near-identical generic question skips the LLM ---
-    eligible = _cache_eligible(user, req, meta["had_context"])
-    if eligible and meta["vec"] is not None:
+    # Gated on ttl (not just `eligible`) so "personal" topic messages (ttl=0 —
+    # e.g. "what's my name") never serve a frozen cached answer that ignores
+    # the user's current memory/profile facts.
+    if eligible and ttl > 0 and meta["vec"] is not None:
         hit = rag.cache_lookup(meta["vec"])
         if hit and hit.get("response"):
             reply_text = hit["response"]
@@ -483,14 +614,24 @@ async def chat(req: ChatReq, request: Request, claims: dict = Depends(current_us
                 "session_id": session_id,
                 "reply": reply_text,
                 "model": hit.get("model", "cache"),
-                "category": category,
+                "category": mode,
                 "citations": [],
                 "usage": entitlements.usage_view(user),
                 "cached": True,
             }
 
+    p_tok = sum(len(m.get("content", "")) if isinstance(m.get("content", ""), str) else sum(len(part.get("text", "")) for part in m.get("content", []) if isinstance(part, dict)) for m in msgs) // 4
+    caps = {}
+    if req.attached_source or p_tok > 15000:
+        caps["long_context"] = True
+    if req.images:
+        # Vision requests must only fall back to vision-capable models — otherwise
+        # a non-vision model can silently land at the end of the chain and either
+        # error or hallucinate about content it never received.
+        caps["vision"] = True
+
     with fairuse.concurrency(user["id"], user.get("role") == "admin"):
-        result = await smart_router.complete(msgs, category=category, allow_premium=allow_premium, model=chosen)
+        result = await smart_router.complete(msgs, mode=mode, intent=intent_str, capabilities_required=caps, temperature=0.7, model=chosen)
 
     # Output-side guard: never return (or store) a reply that leaked the system
     # prompt / canary or signalled a successful jailbreak.
@@ -503,7 +644,8 @@ async def chat(req: ChatReq, request: Request, claims: dict = Depends(current_us
 
     db.add_message(session_id, user["id"], "user", req.message)
     db.add_message(session_id, user["id"], "assistant", reply_text,
-                   model=result["model"], tokens=result["completion_tokens"])
+                   model=result["model"], tokens=result["completion_tokens"],
+                   prompt_tokens=result.get("prompt_tokens", 0), cost_usd=result.get("cost_usd", 0.0))
     db.touch_session(session_id)
     entitlements.record_usage(user["id"], result["model"],
                               result["prompt_tokens"], result["completion_tokens"],
@@ -512,17 +654,25 @@ async def chat(req: ChatReq, request: Request, claims: dict = Depends(current_us
     _queue_memory(user, req.message, session_id)
 
     # Cache only generic, non-personalised answers that passed the output guard.
-    if eligible and meta["vec"] is not None and reply_text != prompt_guard.OUTPUT_REDACTION:
-        rag.cache_store(meta["vec"], reply_text, result["model"], question=req.message)
+    if eligible and reply_text != prompt_guard.OUTPUT_REDACTION:
+        if ttl > 0:
+            redis_client.cache_set_json("exact", _exact_cache_key(req.message, mode), 
+                                        {"response": reply_text, "model": result["model"]}, ttl)
+        if ttl > 0 and meta["vec"] is not None:
+            rag.cache_store(meta["vec"], reply_text, result["model"], question=req.message)
 
     usage = entitlements.usage_view(db.get_user(user["id"]))  # percentage only
     return {
         "session_id": session_id,
         "reply": reply_text,
         "model": result["model"],
-        "category": category,
+        "category": mode,
+        "topic": meta.get("topic"),
         "citations": citations,
         "usage": usage,
+        "prompt_tokens": result.get("prompt_tokens", 0),
+        "completion_tokens": result.get("completion_tokens", 0),
+        "cost_usd": result.get("cost_usd", 0.0),
     }
 
 
@@ -576,13 +726,61 @@ async def chat_stream(req: ChatReq, request: Request, claims: dict = Depends(cur
                                           "X-Accel-Buffering": "no"})
 
     msgs, citations, meta = await _build_messages(user, req)
+    classification = meta["classification"]
     chosen = _chosen_model(user, req)
-    category = "custom" if chosen else _category(user, req.message, allow_premium, req.category, bool(req.images))
+    # Routed through a dedicated chain (Qwen3.5-9B first, free Groq/Zenmux
+    # models as graceful fallback if it errors) rather than a hard single-model
+    # override — used ONLY when the message needs language support the free
+    # models lack (see _needs_multilingual_fallback), never as a default, and
+    # never for explicit picks or vision (own chain).
+    force_multilingual = (not chosen and not req.images
+                          and _needs_multilingual_fallback(req.message))
+    if chosen:
+        mode, intent_str = "custom", "custom"
+    else:
+        if force_multilingual:
+            mode, intent_str = "multilingual", "multilingual"
+        elif bool(req.images):
+            mode, intent_str = "vision", "vision"
+        elif entitlements.should_downshift(user):
+            mode, intent_str = "general", "instant"
+        elif allow_premium:
+            mode, intent_str = "premium", "premium"
+        elif req.category and req.category in _PICKABLE:
+            mode, intent_str = req.category, req.category
+        else:
+            mode, intent_str = classification.mode, classification.intent
     is_admin = user.get("role") == "admin"
+    
+    # --- Exact Match Redis Cache (0 tokens, 1ms) ---
     eligible = _cache_eligible(user, req, meta["had_context"])
+    ttl = _MODE_TTLS.get(mode, 0)
+    
+    if eligible and ttl > 0:
+        cache_key = _exact_cache_key(req.message, mode)
+        hit = redis_client.cache_get_json("exact", cache_key)
+        if hit and hit.get("response"):
+            cached_text = hit["response"]
+            cached_model = hit.get("model", "exact_cache")
+            async def exact_cached_gen():
+                yield _sse({"event": "session", "session_id": session_id})
+                yield _sse({"event": "delta", "text": cached_text})
+                db.add_message(session_id, user["id"], "user", req.message)
+                db.add_message(session_id, user["id"], "assistant", cached_text,
+                               model=cached_model, tokens=0)
+                db.touch_session(session_id)
+                auto_memory.schedule(user["id"], req.message, user.get("memory_enabled", True))
+                yield _sse({"event": "done", "model": cached_model,
+                            "usage": entitlements.usage_view(user), "cached": True})
+            return StreamingResponse(exact_cached_gen(), media_type="text/event-stream",
+                                     headers={"Cache-Control": "no-cache, no-transform",
+                                              "Connection": "keep-alive",
+                                              "X-Accel-Buffering": "no"})
 
     # --- Semantic cache hit: stream the cached answer, skip the LLM entirely ---
-    if eligible and meta["vec"] is not None:
+    # Gated on ttl (see non-streaming endpoint above) so personal-topic
+    # messages never replay a stale cached answer.
+    if eligible and ttl > 0 and meta["vec"] is not None:
         hit = rag.cache_lookup(meta["vec"])
         if hit and hit.get("response"):
             cached_text = hit["response"]
@@ -608,6 +806,13 @@ async def chat_stream(req: ChatReq, request: Request, claims: dict = Depends(cur
     # and suppressed BEFORE it can reach the client.
     guard_tail = 40
 
+    p_tok = sum(len(m.get("content", "")) if isinstance(m.get("content", ""), str) else sum(len(part.get("text", "")) for part in m.get("content", []) if isinstance(part, dict)) for m in msgs) // 4
+    caps = {}
+    if req.attached_source or p_tok > 15000:
+        caps["long_context"] = True
+    if req.images:
+        caps["vision"] = True
+
     async def gen():
         yield _sse({"event": "session", "session_id": session_id})
         if citations:
@@ -618,7 +823,7 @@ async def chat_stream(req: ChatReq, request: Request, claims: dict = Depends(cur
         leaked = False
         try:
             with fairuse.concurrency(user["id"], is_admin):
-                async for chunk in smart_router.stream(msgs, category=category, allow_premium=allow_premium, model=chosen):
+                async for chunk in smart_router.stream(msgs, mode=mode, intent=intent_str, capabilities_required=caps, temperature=0.7, model=chosen):
                     if "delta" in chunk:
                         full += chunk["delta"]
                         if prompt_guard.output_leaked(full)[0]:
@@ -659,7 +864,9 @@ async def chat_stream(req: ChatReq, request: Request, claims: dict = Depends(cur
             db.add_message(session_id, user["id"], "user", req.message)
             db.add_message(session_id, user["id"], "assistant", text_to_store,
                            model=(final or {}).get("model", "guard"),
-                           tokens=(final or {}).get("completion_tokens", 0))
+                           tokens=(final or {}).get("completion_tokens", 0),
+                           prompt_tokens=(final or {}).get("prompt_tokens", 0),
+                           cost_usd=(final or {}).get("cost_usd", 0.0))
             db.touch_session(session_id)
             if final:
                 entitlements.record_usage(user["id"], final["model"],
@@ -668,12 +875,22 @@ async def chat_stream(req: ChatReq, request: Request, claims: dict = Depends(cur
             auto_memory.schedule(user["id"], req.message, user.get("memory_enabled", True))
             _queue_memory(user, req.message, session_id)
             # Cache generic, non-personalised, non-redacted answers for reuse.
-            if (eligible and meta["vec"] is not None and final
-                    and not leaked and text_to_store
+            if (eligible and final and not leaked and text_to_store 
                     and prompt_guard.OUTPUT_REDACTION not in text_to_store):
-                rag.cache_store(meta["vec"], text_to_store, final["model"], question=req.message)
+                if ttl > 0:
+                    redis_client.cache_set_json("exact", _exact_cache_key(req.message, mode), 
+                                                {"response": text_to_store, "model": final["model"]}, ttl)
+                if ttl > 0 and meta["vec"] is not None:
+                    rag.cache_store(meta["vec"], text_to_store, final["model"], question=req.message)
             usage = entitlements.usage_view(db.get_user(user["id"]))
-            yield _sse({"event": "done", "model": (final or {}).get("model", "guard"), "usage": usage})
+            yield _sse({
+                "event": "done",
+                "model": (final or {}).get("model", "guard"),
+                "usage": usage,
+                "prompt_tokens": (final or {}).get("prompt_tokens", 0),
+                "completion_tokens": (final or {}).get("completion_tokens", 0),
+                "cost_usd": (final or {}).get("cost_usd", 0.0)
+            })
 
     headers = {
         "Cache-Control": "no-cache, no-transform",

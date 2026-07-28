@@ -304,7 +304,8 @@ _INTENTS: list[tuple[set[str], list[str]]] = [
     ({"how are you", "how are you doing", "how r u", "how ru", "how are u",
       "hows it going", "how is it going", "how do you do", "whats up", "what's up",
       "wassup", "sup", "how you doing", "how are things", "you good", "are you ok",
-      "how are you today"}, HOW_ARE_YOU),
+      "how are you today", "what are you doing", "what are you up to",
+      "what you doing", "whatre you doing", "what r u doing", "wyd"}, HOW_ARE_YOU),
     ({"who are you", "what are you", "whats your name", "what's your name",
       "what is your name", "who r u", "who are u", "introduce yourself",
       "tell me about yourself", "your name", "who are you kgpt", "what is kgpt",
@@ -332,7 +333,8 @@ _INTENTS: list[tuple[set[str], list[str]]] = [
       "namaste", "namaskaram", "haay", "halo", "subhodayam"}, GREETING_TE),
     ({"ఎలా ఉన్నావు", "ఎలా ఉన్నారు", "మీరు ఎలా ఉన్నారు", "నువ్వు ఎలా ఉన్నావు", "ఎలా ఉన్నావ్",
       "ela unnaru", "ela unnav", "ela unnavu", "meeru ela unnaru", "nuvvu ela unnav",
-      "ela unnaru kgpt"}, HOW_ARE_YOU_TE),
+      "ela unnaru kgpt", "em chesthunnav", "em chestunnav", "emchestunnav",
+      "thinnava", "tinnava", "tindi tinnava", "bagunnava"}, HOW_ARE_YOU_TE),
     ({"నువ్వు ఎవరు", "మీరు ఎవరు", "నీ పేరు ఏమిటి", "నువ్వు ఎవరివి", "నీ పేరు ఏంటి",
       "nuvvu evaru", "meeru evaru", "nee peru emiti", "nee peru enti",
       "nuvvu evaru kgpt"}, WHO_ARE_YOU_TE),
@@ -408,8 +410,8 @@ _CASUAL_TOKENS = {
     "hi", "hii", "hiii", "hiiii", "hello", "helo", "hey", "heya", "hiya", "yo",
     "sup", "wassup", "wsg", "wyd", "there", "greetings", "gm", "gn",
     "good", "morning", "afternoon", "evening", "night",
-    "how", "are", "you", "u", "r", "ru", "doing", "hows", "its", "going",
-    "is", "it", "whats", "up", "wassup", "things",
+    "how", "what", "are", "you", "u", "r", "ru", "doing", "hows", "its", "going",
+    "is", "it", "whats", "up", "to", "wassup", "things",
     "thanks", "thank", "thx", "ty", "thankyou", "appreciated", "much",
     "cool", "ok", "okay", "k", "alright", "fine", "great", "awesome", "nice",
     "lol", "haha", "hmm", "yeah", "yes", "no", "nope", "yep", "yup", "ya",
@@ -424,12 +426,29 @@ _MAX_CASUAL_LEN = 45
 # greeting / identity / capability detection.
 _FILLER = {"dude", "bro", "bruh", "man", "sir", "maam", "mam", "buddy", "mate",
            "boss", "yaar", "yar", "bhai", "please", "pls", "kgpt", "hey", "yo",
-           "just", "actually", "hmm", "umm", "na", "re", "ok", "okay", "so"}
+           "just", "actually", "hmm", "umm", "na", "re", "ok", "okay", "so",
+           "ra", "mawaa", "mava", "abbay", "le"}
 
 # Words that signal a question ABOUT the assistant itself (its identity /
 # capabilities) — these never need a knowledge-base search.
 _META = {"capabilities", "capability", "capable", "abilities", "ability",
          "features", "feature", "skills", "skill", "purpose"}
+
+
+# Romanized (Tenglish/Hinglish-style) greeting fragments that don't fit a
+# strict exact-phrase match (too many casual variants: "ra"/"mawaa"/"bro" etc.
+# tacked on) but are unambiguously small-talk whenever they appear anywhere in
+# the message. Matched as a SUBSTRING, not tokenised against _CASUAL_TOKENS —
+# these words aren't in that English-only set, which is exactly the gap that
+# let "em chesthunnav ra mawaa" ("what are you up to, bro" in Telugu) run a
+# full KB search and burn tokens instead of getting an instant reply. This is
+# also imported by `topic.py` so its own greeting classification stays in
+# sync with what actually skips retrieval, instead of two independent lists.
+GREETING_SUBSTRINGS = (
+    "thinnava", "tinnava", "tindi tinnava", "em chesthunnav", "em chestunnav",
+    "emchestunnav", "bagunnava", "ela unnav", "ela unnaru", "kushal", "kaise ho",
+    "khana khaya", "kya kar rahe ho", "kya kar raha hai",
+)
 
 
 def _strip_filler(cleaned: str) -> str:
@@ -441,6 +460,8 @@ def is_smalltalk(message: str) -> bool:
     NOT worth a knowledge-base search. Conservative by design."""
     cleaned = _normalise_spaces(_clean(message))
     if not cleaned:
+        return True
+    if any(g in cleaned for g in GREETING_SUBSTRINGS):
         return True
     stripped = _normalise_spaces(_strip_filler(cleaned))
     # Exact intent phrase (incl. Telugu/Hindi pools), with or without filler

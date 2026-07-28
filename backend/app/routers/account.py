@@ -16,12 +16,16 @@ _VALID_STYLES = set(prompting.STYLES.keys())
 # Fields a (non-admin) student must fill before using K-GPT. Year/semester are
 # DERIVED from admission_year + the calendar, so they are not collected directly.
 _REQUIRED_PROFILE = ("full_name", "roll_no", "course", "branch", "admission_year", "section")
+# Faculty have a different required set — department + contact mobile, not cohort.
+_REQUIRED_FACULTY = ("full_name", "department", "mobile")
 
 
 def profile_complete(u: dict) -> bool:
-    if u.get("role") == "admin":
+    role = u.get("role")
+    if role == "admin":
         return True
-    return all(u.get(k) not in (None, "") for k in _REQUIRED_PROFILE)
+    required = _REQUIRED_FACULTY if role == "faculty" else _REQUIRED_PROFILE
+    return all(u.get(k) not in (None, "") for k in required)
 
 
 @router.get("/usage")
@@ -53,12 +57,15 @@ async def get_prefs(claims: dict = Depends(current_user)):
         "exam_mode": bool(u.get("exam_mode")),
         "memory_enabled": bool(u.get("memory_enabled", True)),
         "web_search_enabled": bool(u.get("web_search_enabled")),
+        "role": u.get("role"),
         "full_name": u.get("full_name"),
         "roll_no": u.get("roll_no"),
         "course": u.get("course"),
         "branch": u.get("branch"),
         "section": u.get("section"),
         "admission_year": u.get("admission_year"),
+        "department": u.get("department"),
+        "mobile": u.get("mobile"),
         "year": cy,
         "semester": cs,
         "profile_complete": profile_complete(u),
@@ -93,10 +100,28 @@ async def set_prefs(req: PrefsReq, claims: dict = Depends(current_user)):
         patch["course"] = req.course.strip() or None
     if req.branch is not None and not u.get("branch"):
         patch["branch"] = (req.branch.strip().upper() or None)
-    if req.admission_year is not None and not u.get("admission_year"):
+    # Students state their CURRENT year directly (not admission year) so detained
+    # students who study behind their roll-number batch are classified correctly.
+    # We store an effective batch year so the cohort still auto-advances each July.
+    if req.year is not None and not u.get("admission_year"):
+        patch["admission_year"] = cohort.batch_year_for(req.year)
+    elif req.admission_year is not None and not u.get("admission_year"):
         patch["admission_year"] = req.admission_year
     if req.section is not None and not u.get("section"):
         patch["section"] = (req.section.strip().upper() or None)
+    # Faculty profile fields (department + mobile) — also set-once via onboarding.
+    if req.department is not None and not u.get("department"):
+        patch["department"] = req.department.strip() or None
+    if req.mobile is not None and not u.get("mobile"):
+        digits = "".join(c for c in req.mobile if c.isdigit())
+        if len(digits) == 12 and digits.startswith("91"):
+            digits = digits[2:]
+        elif len(digits) == 11 and digits.startswith("0"):
+            digits = digits[1:]
+        if len(digits) != 10 or digits[0] not in "6789":
+            raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                                "Enter a valid 10-digit mobile number.")
+        patch["mobile"] = digits
     if patch:
         updated = db.update_user(claims["user_id"], patch)
     else:

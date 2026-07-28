@@ -128,6 +128,27 @@ def test_chunk_text_basic_and_overlap():
     assert all(c.strip() for c in chunks)
 
 
+def test_extract_flags_scanned_pdf_page_for_ocr():
+    from app.services import extract
+
+    class FakePage:
+        def get_images(self, full=True):
+            return [("img",)]
+
+    assert extract._page_needs_ocr(FakePage(), "x y z 1 2 3") is True
+
+
+def test_extract_keeps_clean_digital_pdf_page_without_ocr():
+    from app.services import extract
+
+    class FakePage:
+        def get_images(self, full=True):
+            return []
+
+    text = ("This is a clean digital PDF page with enough readable words. " * 8).strip()
+    assert extract._page_needs_ocr(FakePage(), text) is False
+
+
 # --- Reranker degrades without an API key -----------------------------------
 def test_reranker_degrades_gracefully():
     from app.services import reranker

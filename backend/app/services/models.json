@@ -1,309 +1,510 @@
 {
-  "_comment": "K-GPT model registry \u2014 cheap-first MoE/light routing. Costs USD per 1M tokens (in/out). Exotic models route via OpenRouter (one key) so the chain stays resilient; SmartRouter circuit-breaks any decommissioned/unavailable id and fails over automatically.",
-  "_zenmux_note": "Models prefixed `zenmux/<vendor>/<model>` route through the ZenMux OpenAI-compatible gateway (needs ZENMUX_API_KEY). IMPORTANT: confirm each slug on https://zenmux.ai/models (format vendor/model, e.g. google/gemini-3.1-pro-preview) and adjust if a call fails \u2014 if a key is missing or a slug is wrong, SmartRouter automatically falls back to the next model in the chain, so nothing breaks.",
-  "categories": {
-    "instant": {
-      "_desc": "Ultra-cheap, sub-second chat \u2014 ZenMux free model first, then Groq.",
-      "primary": "zenmux/z-ai/glm-4.7-flashx",
-      "fallbacks": [
-        "groq/llama-3.1-8b-instant",
-        "groq/gemma2-9b-it",
-        "gemini/gemini-1.5-flash-8b",
-        "openai/gpt-4o-mini"
-      ]
-    },
-    "fast_chat": {
-      "_desc": "Default everyday chat \u2014 ZenMux free model first, then robust fallbacks.",
-      "primary": "zenmux/z-ai/glm-4.7-flash",
-      "fallbacks": [
-        "gemini/gemini-2.0-flash",
-        "deepseek/deepseek-chat",
-        "groq/llama-3.1-8b-instant",
-        "groq/gemma2-9b-it",
-        "groq/llama-3.3-70b-versatile"
-      ]
-    },
-    "reasoning": {
-      "_desc": "Deep STEM/logic \u2014 ZenMux free DeepSeek V4 Pro first, strong fallbacks.",
-      "primary": "zenmux/deepseek/deepseek-v4-pro",
-      "fallbacks": [
-        "deepseek/deepseek-chat",
-        "groq/llama-3.3-70b-versatile",
-        "gemini/gemini-2.0-flash",
-        "openrouter/qwen/qwen-2.5-72b-instruct"
-      ]
-    },
-    "coding": {
-      "_desc": "Code gen/debug \u2014 ZenMux Kimi K2.7 Code first, then DeepSeek Coder.",
-      "primary": "zenmux/moonshotai/kimi-k2.7-code",
-      "fallbacks": [
-        "deepseek/deepseek-coder",
-        "openrouter/qwen/qwen-2.5-coder-32b-instruct",
-        "mistral/codestral-latest",
-        "groq/llama-3.3-70b-versatile"
-      ]
-    },
-    "multilingual": {
-      "_desc": "Indian languages / mixed \u2014 ZenMux Qwen3.7-Max first; strong fallbacks.",
-      "primary": "zenmux/qwen/qwen3.7-max",
-      "fallbacks": [
-        "openrouter/qwen/qwen-2.5-72b-instruct",
-        "gemini/gemini-2.0-flash",
-        "groq/llama-3.3-70b-versatile"
-      ]
-    },
-    "vision": {
-      "_desc": "Image/diagram understanding \u2014 ZenMux free vision first, Gemini fallback.",
-      "primary": "zenmux/z-ai/glm-4.6v-flash",
-      "fallbacks": [
-        "gemini/gemini-2.0-flash",
-        "openai/gpt-4o-mini",
-        "gemini/gemini-1.5-flash-8b"
-      ]
-    },
-    "long_context": {
-      "_desc": "Big PDFs/codebases \u2014 ZenMux Qwen3.7-Plus first, Gemini fallback.",
-      "primary": "zenmux/qwen/qwen3.7-plus",
-      "fallbacks": [
-        "gemini/gemini-2.0-flash",
-        "openrouter/ai21/jamba-1-5-mini",
-        "mistral/open-mistral-nemo",
-        "openrouter/moonshotai/kimi-k2"
-      ]
-    },
-    "tool_use": {
-      "_desc": "Function calling / routing \u2014 ZenMux first, Groq tool model fallback.",
-      "primary": "zenmux/deepseek/deepseek-v4-pro",
-      "fallbacks": [
-        "groq/llama3-groq-8b-8192-tool-use-preview",
-        "openai/gpt-4o-mini",
-        "groq/llama-3.3-70b-versatile"
-      ]
-    },
-    "rag": {
-      "_desc": "Cited answers over memory/docs \u2014 ZenMux first, Command R fallback.",
-      "primary": "zenmux/deepseek/deepseek-v4-pro",
-      "fallbacks": [
-        "cohere/command-r",
-        "gemini/gemini-2.0-flash",
-        "groq/llama-3.3-70b-versatile"
-      ]
-    },
-    "background": {
-      "_desc": "Internal jobs \u2014 chat titles, intent, summaries. ZenMux free first.",
-      "primary": "zenmux/stepfun/step-3.7-flash",
-      "fallbacks": [
-        "nvidia_nim/nvidia/nemotron-mini-4b-instruct",
-        "groq/llama-3.1-8b-instant",
-        "groq/gemma2-9b-it"
-      ]
-    },
-    "premium": {
-      "_desc": "Opt-in best \u2014 ZenMux-discounted Claude Sonnet 4.6 lead, cost-controlled.",
-      "primary": "zenmux/anthropic/claude-sonnet-4.6",
-      "fallbacks": [
-        "zenmux/z-ai/glm-5.2",
-        "openai/gpt-4o-mini",
-        "gemini/gemini-2.5-flash",
-        "anthropic/claude-3-5-sonnet-20241022"
-      ]
-    }
-  },
-  "pricing_per_1m": {
-    "groq/llama-3.1-8b-instant": {
-      "in": 0.05,
-      "out": 0.08
-    },
-    "groq/llama-3.3-70b-versatile": {
-      "in": 0.59,
-      "out": 0.79
-    },
-    "groq/gemma2-9b-it": {
-      "in": 0.06,
-      "out": 0.06
-    },
-    "groq/llama3-groq-8b-8192-tool-use-preview": {
-      "in": 0.05,
-      "out": 0.08
-    },
-    "gemini/gemini-1.5-flash-8b": {
-      "in": 0.075,
-      "out": 0.3
-    },
-    "gemini/gemini-2.0-flash": {
-      "in": 0.1,
-      "out": 0.4
-    },
-    "gemini/gemini-2.5-flash": {
-      "in": 0.5,
-      "out": 1.5
-    },
-    "openai/gpt-4o-mini": {
-      "in": 0.15,
-      "out": 0.6
-    },
-    "anthropic/claude-3-5-sonnet-20241022": {
-      "in": 3.0,
-      "out": 15.0
-    },
-    "deepseek/deepseek-chat": {
-      "in": 0.3,
-      "out": 0.5
-    },
-    "deepseek/deepseek-coder": {
-      "in": 0.14,
-      "out": 0.28
-    },
-    "mistral/codestral-latest": {
-      "in": 0.3,
-      "out": 0.9
-    },
-    "mistral/open-mixtral-8x7b": {
-      "in": 0.2,
-      "out": 0.2
-    },
-    "mistral/open-mixtral-8x22b": {
-      "in": 0.5,
-      "out": 0.5
-    },
-    "mistral/open-mistral-nemo": {
-      "in": 0.15,
-      "out": 0.15
-    },
-    "mistral/ministral-8b-latest": {
-      "in": 0.1,
-      "out": 0.1
-    },
-    "cohere/command-r": {
-      "in": 0.5,
-      "out": 1.5
-    },
-    "nvidia_nim/nvidia/nemotron-mini-4b-instruct": {
-      "in": 0.03,
-      "out": 0.03
-    },
-    "nvidia_nim/nvidia/llama-3.1-nemotron-70b-instruct": {
-      "in": 0.59,
-      "out": 0.79
-    },
-    "fireworks_ai/accounts/fireworks/models/llama-v3p3-70b-instruct": {
-      "in": 0.9,
-      "out": 0.9
-    },
-    "fireworks_ai/accounts/fireworks/models/mixtral-8x22b-instruct": {
-      "in": 0.5,
-      "out": 0.5
-    },
-    "openrouter/qwen/qwen-2.5-72b-instruct": {
-      "in": 0.29,
-      "out": 0.59
-    },
-    "openrouter/qwen/qwen-2.5-coder-32b-instruct": {
-      "in": 0.29,
-      "out": 0.59
-    },
-    "openrouter/deepseek/deepseek-chat": {
-      "in": 0.3,
-      "out": 0.5
-    },
-    "openrouter/01-ai/yi-lightning": {
-      "in": 0.14,
-      "out": 0.28
-    },
-    "openrouter/thudm/glm-4-flash": {
-      "in": 0.1,
-      "out": 0.3
-    },
-    "openrouter/moonshotai/kimi-k2": {
-      "in": 0.4,
-      "out": 1.2
-    },
-    "openrouter/ai21/jamba-1-5-mini": {
-      "in": 0.2,
-      "out": 0.4
-    },
-    "openrouter/databricks/dbrx-instruct": {
-      "in": 0.6,
-      "out": 0.6
-    },
-    "openrouter/microsoft/wizardlm-2-8x22b": {
-      "in": 0.5,
-      "out": 0.5
-    },
-    "openrouter/minimax/minimax-m1": {
-      "in": 0.3,
-      "out": 1.2
-    },
-    "fireworks_ai/accounts/fireworks/models/kimi-k2p7-code": {
-      "in": 0.95,
-      "out": 4.0
-    },
-    "fireworks_ai/accounts/fireworks/models/minimax-m3": {
-      "in": 0.3,
-      "out": 1.2
-    },
-    "fireworks_ai/accounts/fireworks/models/qwen3p7-plus": {
-      "in": 0.4,
-      "out": 1.6
-    },
-    "fireworks_ai/accounts/fireworks/models/deepseek-v4-pro": {
-      "in": 1.74,
-      "out": 3.48
-    },
-    "fireworks_ai/accounts/fireworks/models/kimi-k2p6": {
-      "in": 0.95,
-      "out": 4.0
-    },
-    "fireworks_ai/accounts/fireworks/models/minimax-m2p7": {
-      "in": 0.3,
-      "out": 1.2
-    },
-    "fireworks_ai/accounts/fireworks/models/qwen3p6-plus": {
-      "in": 0.5,
-      "out": 3.0
-    },
-    "fireworks_ai/accounts/fireworks/models/glm-5p1": {
-      "in": 1.4,
-      "out": 4.4
-    },
-    "fireworks_ai/accounts/fireworks/models/gpt-oss-120b": {
-      "in": 0.15,
-      "out": 0.6
-    },
-    "fireworks_ai/accounts/fireworks/models/gpt-oss-20b": {
-      "in": 0.07,
-      "out": 0.3
-    },
-    "fireworks_ai/accounts/fireworks/models/nemotron-3-ultra-nvfp4": {
-      "in": 0.6,
-      "out": 2.4
-    },
-    "fireworks_ai/accounts/fireworks/models/deepseek-v4-flash": {
-      "in": 0.14,
-      "out": 0.28
-    },
-    "zenmux/z-ai/glm-4.7-flash": { "in": 0, "out": 0 },
-    "zenmux/z-ai/glm-4.7-flashx": { "in": 0, "out": 0 },
-    "zenmux/z-ai/glm-4.6v-flash": { "in": 0, "out": 0 },
-    "zenmux/deepseek/deepseek-v4-pro": { "in": 0, "out": 0 },
-    "zenmux/stepfun/step-3.7-flash": { "in": 0, "out": 0 },
-    "zenmux/moonshotai/kimi-k2.7-code": { "in": 0.5, "out": 2.0 },
-    "zenmux/qwen/qwen3.7-max": { "in": 0.3, "out": 1.2 },
-    "zenmux/qwen/qwen3.7-plus": { "in": 0.2, "out": 0.8 },
-    "zenmux/z-ai/glm-5.2": { "in": 0.3, "out": 1.0 },
-    "zenmux/anthropic/claude-sonnet-4.6": { "in": 0.3, "out": 0.31 }
-  },
+  "_comment": "K-GPT Model Registry (v8)",
   "provider_env": {
+    "mistral": "MISTRAL_API_KEY",
     "zenmux": "ZENMUX_API_KEY",
     "groq": "GROQ_API_KEY",
     "gemini": "GEMINI_API_KEY",
     "openai": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
-    "mistral": "MISTRAL_API_KEY",
     "deepseek": "DEEPSEEK_API_KEY",
     "cohere": "COHERE_API_KEY",
     "fireworks_ai": "FIREWORKS_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
     "nvidia_nim": "NVIDIA_NIM_API_KEY"
+  },
+  "modes": {
+    "education": [
+      "openrouter/mistralai/mistral-nemo",
+      "groq/llama-3.3-70b-versatile",
+      "zenmux/z-ai/glm-5.2",
+      "zenmux/minimax/minimax-m3",
+      "zenmux/qwen/qwen3.7-plus",
+      "zenmux/z-ai/glm-4.7-flash-free",
+      "zenmux/stepfun/step-3.7-flash-free",
+      "zenmux/google/gemini-2.5-flash-lite",
+      "zenmux/openai/gpt-4.1-nano",
+      "zenmux/sapiens-ai/agnes-2.0-flash",
+      "mistral/mistral-small-latest",
+      "fireworks_ai/accounts/fireworks/models/deepseek-v4-flash",
+      "openrouter/openai/gpt-oss-120b:free",
+      "openrouter/meta-llama/llama-3.3-70b-instruct:free"
+    ],
+    "coding": [
+      "mistral/codestral-latest",
+      "groq/llama-3.3-70b-versatile",
+      "zenmux/moonshotai/kimi-k2.7-code",
+      "zenmux/kuaishou/kat-coder-pro-v2",
+      "fireworks_ai/accounts/fireworks/models/deepseek-v4-flash",
+      "openrouter/qwen/qwen3-coder:free"
+    ],
+    "vision": [
+      "zenmux/google/gemini-2.5-flash-lite",
+      "zenmux/qwen/qwen3.5-flash",
+      "zenmux/z-ai/glm-4.6v-flash-free",
+      "openrouter/google/gemini-2.5-flash",
+      "openrouter/qwen/qwen-2.5-vl-72b-instruct",
+      "openrouter/google/gemini-2.5-pro",
+      "gemini/gemini-2.0-flash"
+    ],
+    "general": [
+      "openrouter/mistralai/mistral-nemo",
+      "groq/llama-3.1-8b-instant",
+      "groq/gemma2-9b-it",
+      "mistral/ministral-8b-latest",
+      "mistral/open-mistral-nemo",
+      "fireworks_ai/accounts/fireworks/models/deepseek-v4-flash",
+      "openrouter/google/gemma-4-31b-it:free",
+      "zenmux/z-ai/glm-4.7-flash-free"
+    ],
+    "lifestyle": [
+      "openrouter/mistralai/mistral-nemo",
+      "groq/llama-3.1-8b-instant",
+      "groq/gemma2-9b-it",
+      "mistral/ministral-8b-latest",
+      "mistral/open-mistral-nemo",
+      "fireworks_ai/accounts/fireworks/models/deepseek-v4-flash",
+      "openrouter/google/gemma-4-31b-it:free",
+      "zenmux/z-ai/glm-4.7-flash-free"
+    ],
+    "medical": [
+      "openrouter/mistralai/mistral-nemo",
+      "groq/llama-3.3-70b-versatile",
+      "zenmux/minimax/minimax-m3",
+      "zenmux/z-ai/glm-5.2",
+      "zenmux/qwen/qwen3.7-plus",
+      "zenmux/z-ai/glm-4.7-flash-free",
+      "zenmux/google/gemini-2.5-flash-lite",
+      "mistral/mistral-small-latest",
+      "fireworks_ai/accounts/fireworks/models/deepseek-v4-flash",
+      "openrouter/openai/gpt-oss-120b:free",
+      "openrouter/meta-llama/llama-3.3-70b-instruct:free"
+    ],
+    "personal": [
+      "openrouter/mistralai/mistral-nemo",
+      "groq/llama-3.3-70b-versatile",
+      "groq/gemma2-9b-it",
+      "mistral/mistral-small-latest",
+      "mistral/open-mistral-nemo",
+      "fireworks_ai/accounts/fireworks/models/deepseek-v4-flash",
+      "openrouter/meta-llama/llama-3.3-70b-instruct:free",
+      "openrouter/google/gemma-4-31b-it:free",
+      "zenmux/z-ai/glm-4.7-flash-free"
+    ],
+    "background": [
+      "zenmux/stepfun/step-3.7-flash-free",
+      "groq/llama-3.1-8b-instant"
+    ],
+    "premium": [
+      "openrouter/mistralai/mistral-nemo",
+      "openrouter/google/gemini-2.5-pro",
+      "zenmux/z-ai/glm-5.2",
+      "zenmux/minimax/minimax-m3",
+      "zenmux/moonshotai/kimi-k2.7-code",
+      "zenmux/qwen/qwen3.7-plus",
+      "mistral/codestral-latest",
+      "groq/llama-3.3-70b-versatile"
+    ],
+    "multilingual": [
+      "openrouter/mistralai/mistral-nemo",
+      "openrouter/qwen/qwen3.5-9b",
+      "zenmux/z-ai/glm-4.7-flash-free",
+      "groq/llama-3.3-70b-versatile",
+      "groq/gemma2-9b-it"
+    ]
+  },
+  "registry": {
+    "groq/llama-3.3-70b-versatile": {
+      "provider": "groq",
+      "capabilities": {
+        "coding": true,
+        "vision": false,
+        "reasoning": true,
+        "long_context": true
+      },
+      "pricing": {
+        "in": 0.59,
+        "out": 0.79
+      }
+    },
+    "groq/llama-3.1-8b-instant": {
+      "provider": "groq",
+      "capabilities": {
+        "coding": false,
+        "vision": false,
+        "reasoning": false,
+        "long_context": false
+      },
+      "pricing": {
+        "in": 0.05,
+        "out": 0.08
+      }
+    },
+    "groq/gemma2-9b-it": {
+      "provider": "groq",
+      "capabilities": {
+        "coding": false,
+        "vision": false,
+        "reasoning": false,
+        "long_context": false
+      },
+      "pricing": {
+        "in": 0.06,
+        "out": 0.06
+      }
+    },
+    "mistral/codestral-latest": {
+      "provider": "mistral",
+      "capabilities": {
+        "coding": true,
+        "vision": false,
+        "reasoning": true,
+        "long_context": true
+      },
+      "pricing": {
+        "in": 0.3,
+        "out": 0.9
+      }
+    },
+    "mistral/mistral-small-latest": {
+      "provider": "mistral",
+      "capabilities": {
+        "coding": true,
+        "vision": false,
+        "reasoning": true,
+        "long_context": false
+      },
+      "pricing": {
+        "in": 0.2,
+        "out": 0.6
+      }
+    },
+    "mistral/ministral-8b-latest": {
+      "provider": "mistral",
+      "capabilities": {
+        "coding": false,
+        "vision": false,
+        "reasoning": false,
+        "long_context": false
+      },
+      "pricing": {
+        "in": 0.1,
+        "out": 0.1
+      }
+    },
+    "mistral/open-mistral-nemo": {
+      "provider": "mistral",
+      "capabilities": {
+        "coding": false,
+        "vision": false,
+        "reasoning": false,
+        "long_context": false
+      },
+      "pricing": {
+        "in": 0.15,
+        "out": 0.15
+      }
+    },
+    "openrouter/mistralai/mistral-nemo": {
+      "provider": "openrouter",
+      "_comment": "First choice (per user request) for education/general/lifestyle/medical/personal/premium/multilingual, except coding. NOTE: officially documented languages are English/French/German/Spanish/Italian/Portuguese/Chinese/Japanese/Korean/Arabic/Hindi — Telugu/Tamil/Kannada/Malayalam are NOT on that list, so placing it ahead of Qwen3.5-9B in the multilingual chain may reintroduce weak Telugu output for those scripts specifically.",
+      "capabilities": {
+        "coding": false,
+        "vision": false,
+        "reasoning": false,
+        "long_context": true
+      },
+      "pricing": {
+        "in": 0.02,
+        "out": 0.03
+      }
+    },
+    "zenmux/z-ai/glm-5.2": {
+      "provider": "zenmux",
+      "capabilities": {
+        "coding": true,
+        "vision": false,
+        "reasoning": true,
+        "long_context": true
+      },
+      "pricing": {
+        "in": 0.3,
+        "out": 1
+      }
+    },
+    "zenmux/z-ai/glm-4.7-flash-free": {
+      "provider": "zenmux",
+      "capabilities": {
+        "coding": false,
+        "vision": false,
+        "reasoning": false,
+        "long_context": false
+      },
+      "pricing": {
+        "in": 0,
+        "out": 0
+      }
+    },
+    "zenmux/z-ai/glm-4.6v-flash-free": {
+      "provider": "zenmux",
+      "capabilities": {
+        "coding": false,
+        "vision": true,
+        "reasoning": false,
+        "long_context": false
+      },
+      "pricing": {
+        "in": 0,
+        "out": 0
+      }
+    },
+    "zenmux/minimax/minimax-m3": {
+      "provider": "zenmux",
+      "capabilities": {
+        "coding": true,
+        "vision": false,
+        "reasoning": true,
+        "long_context": false
+      },
+      "pricing": {
+        "in": 0.3,
+        "out": 1.2
+      }
+    },
+    "zenmux/qwen/qwen3.7-plus": {
+      "provider": "zenmux",
+      "capabilities": {
+        "coding": true,
+        "vision": false,
+        "reasoning": true,
+        "long_context": true
+      },
+      "pricing": {
+        "in": 0.2,
+        "out": 0.8
+      }
+    },
+    "zenmux/qwen/qwen3.5-flash": {
+      "provider": "zenmux",
+      "capabilities": {
+        "coding": false,
+        "vision": true,
+        "reasoning": false,
+        "long_context": false
+      },
+      "pricing": {
+        "in": 0.3,
+        "out": 1
+      }
+    },
+    "zenmux/stepfun/step-3.7-flash-free": {
+      "provider": "zenmux",
+      "capabilities": {
+        "coding": false,
+        "vision": false,
+        "reasoning": false,
+        "long_context": false
+      },
+      "pricing": {
+        "in": 0,
+        "out": 0
+      }
+    },
+    "zenmux/google/gemini-2.5-flash-lite": {
+      "provider": "zenmux",
+      "capabilities": {
+        "coding": false,
+        "vision": true,
+        "reasoning": false,
+        "long_context": true
+      },
+      "pricing": {
+        "in": 0.01,
+        "out": 0.04
+      }
+    },
+    "zenmux/openai/gpt-4.1-nano": {
+      "provider": "zenmux",
+      "capabilities": {
+        "coding": false,
+        "vision": false,
+        "reasoning": false,
+        "long_context": false
+      },
+      "pricing": {
+        "in": 0.05,
+        "out": 0.2
+      }
+    },
+    "zenmux/sapiens-ai/agnes-2.0-flash": {
+      "provider": "zenmux",
+      "capabilities": {
+        "coding": false,
+        "vision": false,
+        "reasoning": false,
+        "long_context": false
+      },
+      "pricing": {
+        "in": 0.2,
+        "out": 0.5
+      }
+    },
+    "zenmux/moonshotai/kimi-k2.7-code": {
+      "provider": "zenmux",
+      "capabilities": {
+        "coding": true,
+        "vision": false,
+        "reasoning": true,
+        "long_context": true
+      },
+      "pricing": {
+        "in": 0.5,
+        "out": 2
+      }
+    },
+    "zenmux/kuaishou/kat-coder-pro-v2": {
+      "provider": "zenmux",
+      "capabilities": {
+        "coding": true,
+        "vision": false,
+        "reasoning": true,
+        "long_context": false
+      },
+      "pricing": {
+        "in": 0.5,
+        "out": 1.5
+      }
+    },
+    "fireworks_ai/accounts/fireworks/models/deepseek-v4-flash": {
+      "provider": "fireworks_ai",
+      "capabilities": {
+        "coding": true,
+        "vision": false,
+        "reasoning": true,
+        "long_context": true
+      },
+      "pricing": {
+        "in": 0.14,
+        "out": 0.28
+      }
+    },
+    "openrouter/openai/gpt-oss-120b:free": {
+      "provider": "openrouter",
+      "capabilities": {
+        "coding": true,
+        "vision": false,
+        "reasoning": true,
+        "long_context": true
+      },
+      "pricing": {
+        "in": 0,
+        "out": 0
+      }
+    },
+    "openrouter/meta-llama/llama-3.3-70b-instruct:free": {
+      "provider": "openrouter",
+      "capabilities": {
+        "coding": true,
+        "vision": false,
+        "reasoning": true,
+        "long_context": false
+      },
+      "pricing": {
+        "in": 0,
+        "out": 0
+      }
+    },
+    "openrouter/qwen/qwen3-coder:free": {
+      "provider": "openrouter",
+      "capabilities": {
+        "coding": true,
+        "vision": false,
+        "reasoning": true,
+        "long_context": false
+      },
+      "pricing": {
+        "in": 0,
+        "out": 0
+      }
+    },
+    "openrouter/google/gemma-4-31b-it:free": {
+      "provider": "openrouter",
+      "capabilities": {
+        "coding": false,
+        "vision": false,
+        "reasoning": false,
+        "long_context": false
+      },
+      "pricing": {
+        "in": 0,
+        "out": 0
+      }
+    },
+    "gemini/gemini-2.0-flash": {
+      "provider": "gemini",
+      "capabilities": {
+        "coding": true,
+        "vision": true,
+        "reasoning": true,
+        "long_context": true
+      },
+      "pricing": {
+        "in": 0.1,
+        "out": 0.4
+      }
+    },
+    "openrouter/google/gemini-2.5-flash": {
+      "provider": "openrouter",
+      "capabilities": {
+        "coding": true,
+        "vision": true,
+        "reasoning": true,
+        "long_context": true
+      },
+      "pricing": {
+        "in": 0.075,
+        "out": 0.3
+      }
+    },
+    "openrouter/google/gemini-2.5-pro": {
+      "provider": "openrouter",
+      "capabilities": {
+        "coding": true,
+        "vision": true,
+        "reasoning": true,
+        "long_context": true
+      },
+      "pricing": {
+        "in": 1.25,
+        "out": 5.00
+      }
+    },
+    "openrouter/qwen/qwen-2.5-vl-72b-instruct": {
+      "provider": "openrouter",
+      "capabilities": {
+        "coding": true,
+        "vision": true,
+        "reasoning": true,
+        "long_context": true
+      },
+      "pricing": {
+        "in": 0.4,
+        "out": 0.4
+      }
+    },
+    "openrouter/qwen/qwen3.5-9b": {
+      "provider": "openrouter",
+      "_comment": "Paid (OpenRouter, $5 credit) — used sparingly. Only appears first in the 'multilingual' mode chain, which chat.py routes to ONLY for messages in a language (Telugu/Tamil/Kannada/Malayalam/Bengali/etc.) the free Groq models handle poorly; falls back to free models in that same chain if it errors. Not in any other chain. 201-language multilingual support, 262K context, natively multimodal.",
+      "capabilities": {
+        "coding": true,
+        "vision": true,
+        "reasoning": true,
+        "long_context": true
+      },
+      "pricing": {
+        "in": 0.10,
+        "out": 0.15
+      }
+    }
   }
 }

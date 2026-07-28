@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 
-IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff"}
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff", ".tif"}
 SUPPORTED = {".pdf", ".docx", ".pptx", ".xlsx", ".xls", ".csv", ".txt", ".md"} | IMAGE_EXTS
 MAX_MB = 50
 MAX_BYTES = MAX_MB * 1024 * 1024  # upload size guard
@@ -66,6 +67,91 @@ def extract_text(filename: str, data: bytes) -> str:
 # A page with fewer than this many extracted characters is treated as having no
 # real text layer (i.e. scanned/image-only) and is sent to OCR when available.
 _OCR_MIN_CHARS_PER_PAGE = 24
+_OCR_SUSPECT_CHARS_WITH_IMAGE = 220
+_OCR_SUSPECT_WORDS_WITH_IMAGE = 40
+
+# Each page is OCR'd as its OWN single-image call (identical code path to a
+# standalone image upload, which is reliable) — NOT batched multiple-pages-per-
+# call. Batching was tried and reverted: cramming 4 dense handwritten page
+# images into one multimodal call regularly produced truncated/incomplete
+# transcriptions per page (small/free-tier vision models silently cut off
+# output well before covering all 4 images), which is why a 17-page scan was
+# only yielding ~11 short chunks of content instead of a full transcription.
+# Real parallelism (many pages in flight at once, each a clean single-image
+# call) gets the same wall-clock win without the quality loss.
+_OCR_MAX_CONCURRENT = 12
+
+
+def _page_needs_ocr(page, text: str) -> bool:
+    """Heuristic for scanned/handwritten PDF pages.
+
+    Some handwritten PDFs contain a tiny broken text layer from the scanner or a
+    few watermark characters, so `page.get_text()` is non-empty but still
+    unusable. We OCR such pages too when the page is image-heavy and the text
+    looks sparse/garbled.
+    """
+    stripped = (text or "").strip()
+    if len(stripped) < _OCR_MIN_CHARS_PER_PAGE:
+        return True
+
+    try:
+        has_images = bool(page.get_images(full=True))
+        has_drawings = bool(page.get_drawings())
+    except Exception:
+        has_images = False
+        has_drawings = False
+    if not (has_images or has_drawings):
+        return False
+
+    words = re.findall(r"\w+", stripped)
+    if len(stripped) < _OCR_SUSPECT_CHARS_WITH_IMAGE:
+        return True
+    if len(words) < _OCR_SUSPECT_WORDS_WITH_IMAGE:
+        return True
+    short_ratio = (sum(1 for w in words if len(w) <= 2) / len(words)) if words else 1.0
+    alnum_ratio = (sum(1 for ch in stripped if ch.isalnum()) / len(stripped)) if stripped else 0.0
+    return short_ratio > 0.55 or alnum_ratio < 0.55
+
+
+def _merge_page_text(original: str, ocr: str) -> str:
+    """Prefer OCR when it clearly recovered more readable content."""
+    base = (original or "").strip()
+    ocr = (ocr or "").strip()
+    if not ocr:
+        return original
+    if not base:
+        return ocr
+    if base.lower() == ocr.lower():
+        return original
+    if base.lower() in ocr.lower():
+        return ocr
+    if len(ocr) >= int(len(base) * 1.2):
+        return ocr
+    return original
+
+
+def pdf_needs_ocr(data: bytes | None = None, path: str | None = None) -> bool:
+    """Fast pre-check: does this PDF have any page that will need vision OCR
+    (scanned/handwritten content)? Used by the upload router to decide whether a
+    document must be routed to background processing instead of the fast inline
+    path — vision OCR can take tens of seconds per page, so it must never run
+    inline on the request path (that would block the request, and on a
+    single-worker deployment, the whole server).
+
+    Fails safe: any error opening/parsing the file is treated as "needs OCR" so
+    we default toward the slower-but-non-blocking background path rather than
+    risking a multi-minute inline stall.
+    """
+    try:
+        import fitz  # PyMuPDF
+        doc = fitz.open(path) if path else fitz.open(stream=data, filetype="pdf")
+        with doc:
+            for page in doc:
+                if _page_needs_ocr(page, page.get_text()):
+                    return True
+        return False
+    except Exception:
+        return True
 
 
 def _pdf(data: bytes) -> str:
@@ -76,7 +162,7 @@ def _pdf(data: bytes) -> str:
         for i, page in enumerate(doc):
             txt = page.get_text()
             parts.append(txt)
-            if len((txt or "").strip()) < _OCR_MIN_CHARS_PER_PAGE:
+            if _page_needs_ocr(page, txt):
                 needs_ocr.append(i)
 
         # Scanned / image-only pages have no digital text layer. OCR them so the
@@ -84,67 +170,98 @@ def _pdf(data: bytes) -> str:
         # its Python binding isn't installed, we keep whatever text we have.
         if needs_ocr:
             ocr = _ocr_pdf_pages(doc, needs_ocr)
+            failed = [i for i in needs_ocr if not (ocr.get(i) or "").strip()]
             for i, text in ocr.items():
                 if text.strip():
-                    parts[i] = text
+                    parts[i] = _merge_page_text(parts[i], text)
+            if failed:
+                # Surface partial OCR failure explicitly instead of silently
+                # dropping pages — otherwise a 30-page handwritten scan where
+                # only a few pages transcribed just looks like a short document,
+                # with no signal to the user or the model about what's missing.
+                pages_1based = ", ".join(str(i + 1) for i in failed)
+                parts.append(
+                    f"\n[OCR note: {len(failed)} of {len(needs_ocr)} scanned/handwritten "
+                    f"page(s) could not be transcribed and may be missing from this "
+                    f"document's searchable content: page(s) {pages_1based}. Consider "
+                    f"re-scanning those pages at higher contrast/resolution and "
+                    f"re-uploading if this content is important.]"
+                )
     return "\n".join(parts)
 
 
-def _tesseract_image(data: bytes) -> str:
-    """Tesseract OCR on raw image bytes. '' if unavailable. Good for printed
-    scans, poor on handwriting (hence the vision-model path in ocr_image)."""
-    try:
-        import io as _io
-        import pytesseract  # type: ignore
-        from PIL import Image  # type: ignore
-        return pytesseract.image_to_string(Image.open(_io.BytesIO(data)))
-    except Exception as e:  # noqa: BLE001
-        print(f"[warn] Tesseract OCR unavailable/failed: {e}")
-        return ""
-
-
 def _ocr_pdf_pages(doc, page_indexes: list[int]) -> dict[int, str]:
-    """OCR the given PDF pages. Returns {page_index: text}. For each page we try
-    the cheap vision model first (90%+ on handwriting) and fall back to Tesseract
-    (printed scans) when vision OCR isn't configured. Never raises."""
-    from app.services import vision_ocr
-    use_vision = vision_ocr.available()
+    """OCR the given PDF pages with the app's configured vision models in parallel."""
     try:
         import fitz  # PyMuPDF
     except Exception:
         return {}
+
+    from concurrent.futures import ThreadPoolExecutor
+    from app.services import vision_ocr
+
     out: dict[int, str] = {}
+    pages_to_process: list[tuple[int, bytes]] = []
+
+    # 1. Render pages sequentially to avoid PyMuPDF multi-threading context issues
     for i in page_indexes:
         try:
-            # 200 DPI render: enough for both engines, keeps the vision payload small.
-            pix = doc[i].get_pixmap(matrix=fitz.Matrix(200 / 72, 200 / 72))
+            # 300 DPI improves handwriting OCR noticeably while staying practical
+            pix = doc[i].get_pixmap(matrix=fitz.Matrix(300 / 72, 300 / 72))
             png = pix.tobytes("png")
-            text = vision_ocr.ocr_image(png, "image/png") if use_vision else ""
-            if not text.strip():
-                text = _tesseract_image(png)
-            if text.strip():
-                out[i] = text
-        except Exception as e:  # noqa: BLE001
-            print(f"[warn] OCR failed on page {i}: {e}")
+            pages_to_process.append((i, png))
+        except Exception as e:
+            print(f"[warn] Failed to render page {i} for OCR: {e}")
+
+    # 2. Resolve the candidate model list ONCE for the whole batch (it's the same
+    # for every page — no need to rebuild it per page) so we can spread pages
+    # across DIFFERENT models instead of every page racing the same pinned model
+    # first. Without this, N concurrent pages all hit model #1 simultaneously,
+    # all trip its rate limit together, then all fall back to model #2 together,
+    # etc. — lockstep contention, not real parallelism. Round-robin rotation lets
+    # each group of concurrent calls start on different models.
+    candidates = vision_ocr._candidate_models()
+
+    # 3. Each page = one clean single-image OCR call — the SAME path a
+    # standalone image upload uses. All pages are fired concurrently (up to
+    # _OCR_MAX_CONCURRENT at once), rotated across different candidate models,
+    # so wall-clock stays close to one call's latency without sacrificing
+    # per-page transcription quality.
+    def ocr_worker(item: tuple[int, bytes, int]) -> tuple[int, str]:
+        idx, png_data, pos = item
+        try:
+            # allow_local=True: this is a page of a multi-page document, the
+            # one case the rented-GPU local model is allowed to handle (when
+            # classified as handwritten). Standalone image uploads deliberately
+            # do NOT set this — see vision_ocr.ocr_image's docstring.
+            text = vision_ocr.ocr_image(png_data, "image/png", models=candidates, rotate=pos, allow_local=True)
+            return idx, text
+        except Exception as e:
+            print(f"[warn] OCR failed on page {idx}: {e}")
+            return idx, ""
+
+    items = [(i, png, pos) for pos, (i, png) in enumerate(pages_to_process)]
+    with ThreadPoolExecutor(max_workers=_OCR_MAX_CONCURRENT) as executor:
+        results = list(executor.map(ocr_worker, items))
+
+    for idx, text in results:
+        if text.strip():
+            out[idx] = text
     return out
 
 
 def ocr_image(data: bytes, mime: str = "image/png") -> str:
-    """OCR a standalone image (PNG/JPG/…), including handwriting. Tries the cheap
-    vision model first, then Tesseract. Best-effort; '' if nothing is available."""
+    """OCR a standalone image (PNG/JPG/…), including handwriting, via vision models."""
     from app.services import vision_ocr
-    text = vision_ocr.ocr_image(data, mime) if vision_ocr.available() else ""
-    if not text.strip():
-        text = _tesseract_image(data)
-    return text
+    return vision_ocr.ocr_image(data, mime) if vision_ocr.available() else ""
 
 
 def _zip_media_ocr(data: bytes, max_images: int = 20, min_bytes: int = 3000) -> str:
     """OCR images embedded inside a DOCX/PPTX (they live under `word/media/` or
     `ppt/media/`). This makes scanned or **handwritten** pictures pasted into an
     Office file searchable, just like a scanned PDF page or a standalone image
-    upload. Uses the same vision-model-first → Tesseract path (`ocr_image`), so
-    handwriting is handled. Tiny images (icons/logos below `min_bytes`) are
+    upload. Uses the same model OCR path (`ocr_image`), so handwriting is
+    handled. Tiny images (icons/logos below `min_bytes`) are
     skipped to avoid noise. Best-effort: returns '' if nothing is found or OCR is
     unavailable; never raises."""
     import zipfile

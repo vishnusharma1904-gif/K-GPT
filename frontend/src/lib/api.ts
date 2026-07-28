@@ -33,21 +33,34 @@ function handleUnauthorized() {
 
 async function req(path: string, opts: RequestInit = {}) {
   const token = getToken();
-  const res = await fetch(`${BASE}${path}`, {
-    ...opts,
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(opts.headers || {}),
-    },
-  });
+  const timeoutMs = 30_000; // 30s — fail before Cloudflare's 100s hard limit
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}${path}`, {
+      ...opts,
+      signal: opts.signal ?? AbortSignal.timeout(timeoutMs),
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(opts.headers || {}),
+      },
+    });
+  } catch (e: any) {
+    if (e.name === "TimeoutError" || e.name === "AbortError") {
+      throw new Error("Request timed out — the server took too long to respond. Please try again.");
+    }
+    throw e;
+  }
   if (res.status === 401) {
     handleUnauthorized();
     throw new Error("Your session has expired. Please log in again.");
   }
   if (!res.ok) {
     let msg = `Request failed (${res.status})`;
-    try { const j = await res.json(); msg = j.detail || msg; } catch {}
+    if (res.status === 524) {
+      msg = "The server took too long to respond. Please check your connection and try again.";
+    }
+    try { const j = await res.json(); msg = typeof j.detail === "string" ? j.detail : (j.detail ? JSON.stringify(j.detail) : msg); } catch {}
     throw new Error(msg);
   }
   return res.status === 204 ? null : res.json();
@@ -58,6 +71,7 @@ export const api = {
   signup: (b: any) => req("/api/auth/signup", { method: "POST", body: JSON.stringify(b) }),
   login: (b: any) => req("/api/auth/login", { method: "POST", body: JSON.stringify(b) }),
   me: () => req("/api/auth/me"),
+  logout: () => req("/api/auth/logout", { method: "POST" }),
   verifyEmail: (token: string) => req("/api/auth/verify", { method: "POST", body: JSON.stringify({ token }) }),
   verifyOtp: (email: string, code: string) => req("/api/auth/verify-otp", { method: "POST", body: JSON.stringify({ email, code }) }),
   resendOtp: (email: string) => req("/api/auth/resend-otp", { method: "POST", body: JSON.stringify({ email }) }),
@@ -162,6 +176,9 @@ export const api = {
     log: (id: string) => req(`/api/admin/users/${id}/log`),
     grantAccess: (id: string, months = 6) => req(`/api/admin/users/${id}/grant-access?months=${months}`, { method: "POST" }),
     setProfile: (id: string, body: any) => req(`/api/admin/users/${id}/profile`, { method: "PATCH", body: JSON.stringify(body) }),
+    facultyPending: () => req("/api/admin/faculty/pending"),
+    approveFaculty: (id: string) => req(`/api/admin/faculty/${id}/approve`, { method: "POST" }),
+    rejectFaculty: (id: string) => req(`/api/admin/faculty/${id}/reject`, { method: "POST" }),
     grantPlan: (ids: string[], plan: string) => req("/api/admin/grant-plan", { method: "POST", body: JSON.stringify({ user_ids: ids, plan }) }),
     resetDaily: (ids: string[]) => req("/api/admin/entitlements/reset-daily", { method: "POST", body: JSON.stringify({ user_ids: ids }) }),
     grantTokens: (ids: string[], tokens: number) => req("/api/admin/entitlements/grant-tokens", { method: "POST", body: JSON.stringify({ user_ids: ids, tokens }) }),
@@ -200,13 +217,22 @@ export const api = {
   },
 };
 
-// Multipart file upload (P29)
-export async function uploadFile(file: File, projectId?: string, shared = false) {
+// Multipart file upload (P29). `scope` (admin/faculty shared uploads only) targets
+// a doc to a cohort — any of branch/year/section; omit for an "Everyone" doc.
+export async function uploadFile(
+  file: File, projectId?: string, shared = false,
+  scope?: { branch?: string; year?: number | string; section?: string },
+) {
   const token = getToken();
   const fd = new FormData();
   fd.append("file", file);
   if (projectId) fd.append("project_id", projectId);
   if (shared) fd.append("shared", "true");
+  if (shared && scope) {
+    if (scope.branch) fd.append("scope_branch", String(scope.branch));
+    if (scope.year) fd.append("scope_year", String(scope.year));
+    if (scope.section) fd.append("scope_section", String(scope.section));
+  }
   const res = await fetch(`${BASE}/api/upload`, {
     method: "POST",
     headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
@@ -215,10 +241,42 @@ export async function uploadFile(file: File, projectId?: string, shared = false)
   if (res.status === 401) { handleUnauthorized(); throw new Error("Your session has expired. Please log in again."); }
   if (!res.ok) {
     let msg = `Upload failed (${res.status})`;
-    try { const j = await res.json(); msg = j.detail || msg; } catch {}
+    if (res.status === 524) {
+      msg = "Upload timed out before indexing finished. Please try again after the fast background-upload update is deployed.";
+    }
+    try { const j = await res.json(); msg = typeof j.detail === "string" ? j.detail : (j.detail ? JSON.stringify(j.detail) : msg); } catch {}
     throw new Error(msg);
   }
   return res.json();
+}
+
+export async function getUploadStatus(documentId: string) {
+  return req(`/api/upload/${documentId}`);
+}
+
+// Document export — turn an assistant reply into a downloadable pdf/docx/xlsx
+// (real tables + rendered charts) and trigger the browser download.
+export async function exportDocument(content: string, format: "pdf" | "docx" | "xlsx", title?: string) {
+  const token = getToken();
+  const res = await fetch(`${BASE}/api/export`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    body: JSON.stringify({ content, format, title }),
+  });
+  if (res.status === 401) { handleUnauthorized(); throw new Error("Your session has expired. Please log in again."); }
+  if (!res.ok) {
+    let msg = `Export failed (${res.status})`;
+    try { const j = await res.json(); msg = typeof j.detail === "string" ? j.detail : (j.detail ? JSON.stringify(j.detail) : msg); } catch {}
+    throw new Error(msg);
+  }
+  const blob = await res.blob();
+  const cd = res.headers.get("Content-Disposition") || "";
+  const m = cd.match(/filename="?([^"]+)"?/);
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = m ? m[1] : `kgpt-document.${format}`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1500);
 }
 
 // Voice transcription (P35) — multipart audio clip -> text
@@ -234,7 +292,7 @@ export async function transcribeAudio(blob: Blob) {
   if (res.status === 401) { handleUnauthorized(); throw new Error("Your session has expired. Please log in again."); }
   if (!res.ok) {
     let msg = `Transcription failed (${res.status})`;
-    try { const j = await res.json(); msg = j.detail || msg; } catch {}
+    try { const j = await res.json(); msg = typeof j.detail === "string" ? j.detail : (j.detail ? JSON.stringify(j.detail) : msg); } catch {}
     throw new Error(msg);
   }
   return res.json();
@@ -262,7 +320,7 @@ export async function streamChat(
   if (res.status === 401) { handleUnauthorized(); throw new Error("Your session has expired. Please log in again."); }
   if (!res.ok || !res.body) {
     let msg = `Chat failed (${res.status})`;
-    try { const j = await res.json(); msg = j.detail || msg; } catch {}
+    try { const j = await res.json(); msg = typeof j.detail === "string" ? j.detail : (j.detail ? JSON.stringify(j.detail) : msg); } catch {}
     throw new Error(msg);
   }
   const reader = res.body.getReader();
